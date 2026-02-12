@@ -1514,6 +1514,7 @@ async function loadActionToolsForExecution({
     });
   }
 
+  const domainSeparatorRegex = new RegExp(actionDomainSeparator, 'g');
   for (const toolName of actionToolNames) {
     let currentDomain = '';
     for (const domain of domainMap.keys()) {
@@ -1530,7 +1531,6 @@ async function loadActionToolsForExecution({
 
     const { action, encrypted, zodSchemas, requestBuilders, functionSignatures } =
       processedActionSets.get(currentDomain);
-    const domainSeparatorRegex = new RegExp(actionDomainSeparator, 'g');
     const normalizedDomain = currentDomain.replace(domainSeparatorRegex, '_');
     const functionName = toolName.replace(`${actionDelimiter}${normalizedDomain}`, '');
     const functionSig = functionSignatures.find((sig) => sig.name === functionName);
