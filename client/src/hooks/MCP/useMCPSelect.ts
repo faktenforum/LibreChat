@@ -35,16 +35,13 @@ export function useMCPSelect({
 
   // Sync ephemeral agent MCP → Jotai atom (strip unconfigured servers)
   useEffect(() => {
-    const mcps = ephemeralAgent?.mcp ?? [];
-    if (mcps.length === 1 && mcps[0] === Constants.mcp_clear) {
-      setMCPValuesRaw([]);
-    } else if (mcps.length > 0 && configuredServers.size > 0) {
-      // Strip out servers that are not available in the startup config
+    const mcps = ephemeralAgent?.mcp;
+    if (Array.isArray(mcps) && mcps.length > 0 && configuredServers.size > 0) {
       const activeMcps = mcps.filter((mcp) => configuredServers.has(mcp));
       if (!isEqual(activeMcps, mcpValues)) {
         setMCPValuesRaw(activeMcps);
       }
-    } else if (mcps.length === 0 && mcpValues.length > 0) {
+    } else if (Array.isArray(mcps) && mcps.length === 0 && mcpValues.length > 0) {
       // Ephemeral agent explicitly has empty MCP (e.g., spec with no MCP servers) — clear atom
       setMCPValuesRaw([]);
     }
