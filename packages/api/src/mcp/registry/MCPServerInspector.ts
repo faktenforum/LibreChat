@@ -2,8 +2,11 @@ import { Constants } from 'librechat-data-provider';
 import type { JsonSchemaType } from '@librechat/data-schemas';
 import type { MCPConnection } from '~/mcp/connection';
 import type * as t from '~/mcp/types';
+import { isMCPDomainAllowed, extractMCPServerDomain } from '~/auth/domain';
 import { MCPConnectionFactory } from '~/mcp/MCPConnectionFactory';
+import { MCPDomainNotAllowedError } from '~/mcp/errors';
 import { detectOAuthRequirement } from '~/mcp/oauth';
+import { hasCustomUserVars } from '~/mcp/utils';
 import { isEnabled } from '~/utils';
 
 /**
@@ -16,6 +19,8 @@ export class MCPServerInspector {
     private readonly serverName: string,
     private readonly config: t.ParsedServerConfig,
     private connection: MCPConnection | undefined,
+    private readonly useSSRFProtection: boolean = false,
+    private readonly allowedDomains?: string[] | null,
   ) {}
 
   /**
@@ -24,15 +29,31 @@ export class MCPServerInspector {
    * @param serverName - The name of the server (used for tool function naming)
    * @param rawConfig - The raw server configuration
    * @param connection - The MCP connection
+   * @param allowedDomains - Optional list of allowed domains for remote transports
    * @returns A fully processed and enriched configuration with server metadata
    */
   public static async inspect(
     serverName: string,
     rawConfig: t.MCPOptions,
     connection?: MCPConnection,
+    allowedDomains?: string[] | null,
   ): Promise<t.ParsedServerConfig> {
+    // Validate domain against allowlist BEFORE attempting connection
+    const isDomainAllowed = await isMCPDomainAllowed(rawConfig, allowedDomains);
+    if (!isDomainAllowed) {
+      const domain = extractMCPServerDomain(rawConfig);
+      throw new MCPDomainNotAllowedError(domain ?? 'unknown');
+    }
+
+    const useSSRFProtection = !Array.isArray(allowedDomains) || allowedDomains.length === 0;
     const start = Date.now();
-    const inspector = new MCPServerInspector(serverName, rawConfig, connection);
+    const inspector = new MCPServerInspector(
+      serverName,
+      rawConfig,
+      connection,
+      useSSRFProtection,
+      allowedDomains,
+    );
     await inspector.inspectServer();
     inspector.config.initDuration = Date.now() - start;
     return inspector.config;
@@ -41,13 +62,20 @@ export class MCPServerInspector {
   private async inspectServer(): Promise<void> {
     await this.detectOAuth();
 
-    if (this.config.startup !== false && !this.config.requiresOAuth) {
+    if (
+      this.config.startup !== false &&
+      !this.config.requiresOAuth &&
+      !hasCustomUserVars(this.config)
+    ) {
       let tempConnection = false;
       if (!this.connection) {
         tempConnection = true;
         this.connection = await MCPConnectionFactory.create({
-          serverName: this.serverName,
           serverConfig: this.config,
+          serverName: this.serverName,
+          dbSourced: !!this.config.dbId,
+          useSSRFProtection: this.useSSRFProtection,
+          allowedDomains: this.allowedDomains,
         });
       }
 

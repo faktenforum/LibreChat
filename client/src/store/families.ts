@@ -6,13 +6,18 @@ import {
   atomFamily,
   DefaultValue,
   selectorFamily,
-  useRecoilState,
   useRecoilValue,
   useSetRecoilState,
   useRecoilCallback,
 } from 'recoil';
-import { LocalStorageKeys, Constants } from 'librechat-data-provider';
-import type { TMessage, TPreset, TConversation, TSubmission } from 'librechat-data-provider';
+import { LocalStorageKeys, isEphemeralAgentId, Constants } from 'librechat-data-provider';
+import type {
+  EModelEndpoint,
+  TConversation,
+  TSubmission,
+  TMessage,
+  TPreset,
+} from 'librechat-data-provider';
 import type { TOptionSettings, ExtendedFile } from '~/common';
 import {
   clearModelForNonEphemeralAgent,
@@ -88,7 +93,7 @@ const conversationByIndex = atomFamily<TConversation | null, string | number>({
             newValue.assistant_id,
           );
         }
-        if (newValue?.agent_id != null && newValue.agent_id) {
+        if (newValue?.agent_id != null && !isEphemeralAgentId(newValue.agent_id)) {
           localStorage.setItem(`${LocalStorageKeys.AGENT_ID_PREFIX}${index}`, newValue.agent_id);
         }
         if (newValue?.spec != null && newValue.spec) {
@@ -149,6 +154,54 @@ const allConversationsSelector = selector({
     const keys = get(conversationKeysAtom);
     return keys.map((key) => get(conversationByIndex(key))).map((convo) => convo?.conversationId);
   },
+});
+
+const conversationIdByIndex = selectorFamily<string | null, string | number>({
+  key: 'conversationIdByIndex',
+  get:
+    (index: string | number) =>
+    ({ get }) =>
+      get(conversationByIndex(index))?.conversationId ?? null,
+});
+
+const conversationEndpointByIndex = selectorFamily<EModelEndpoint | null, string | number>({
+  key: 'conversationEndpointByIndex',
+  get:
+    (index: string | number) =>
+    ({ get }) =>
+      get(conversationByIndex(index))?.endpoint ?? null,
+});
+
+const conversationModelByIndex = selectorFamily<string | null, string | number>({
+  key: 'conversationModelByIndex',
+  get:
+    (index: string | number) =>
+    ({ get }) =>
+      get(conversationByIndex(index))?.model ?? null,
+});
+
+const conversationSpecByIndex = selectorFamily<string | null, string | number>({
+  key: 'conversationSpecByIndex',
+  get:
+    (index: string | number) =>
+    ({ get }) =>
+      get(conversationByIndex(index))?.spec ?? null,
+});
+
+const conversationAgentIdByIndex = selectorFamily<string | null, string | number>({
+  key: 'conversationAgentIdByIndex',
+  get:
+    (index: string | number) =>
+    ({ get }) =>
+      get(conversationByIndex(index))?.agent_id ?? null,
+});
+
+const conversationAssistantIdByIndex = selectorFamily<string | null, string | number>({
+  key: 'conversationAssistantIdByIndex',
+  get:
+    (index: string | number) =>
+    ({ get }) =>
+      get(conversationByIndex(index))?.assistant_id ?? null,
 });
 
 const presetByIndex = atomFamily<TPreset | null, string | number>({
@@ -268,17 +321,25 @@ const messagesSiblingIdxFamily = atomFamily<number, string | null | undefined>({
 
 function useCreateConversationAtom(key: string | number) {
   const hasSetConversation = useSetConvoContext();
-  const [keys, setKeys] = useRecoilState(conversationKeysAtom);
-  const setConversation = useSetRecoilState(conversationByIndex(key));
+  const setKeys = useSetRecoilState(conversationKeysAtom);
   const conversation = useRecoilValue(conversationByIndex(key));
+  const setConversation = useSetRecoilState(conversationByIndex(key));
 
   useEffect(() => {
-    if (!keys.includes(key)) {
-      setKeys([...keys, key]);
-    }
-  }, [key, keys, setKeys]);
+    setKeys((prevKeys) => {
+      if (prevKeys.includes(key)) {
+        return prevKeys;
+      }
+      return [...prevKeys, key];
+    });
+  }, [key, setKeys]);
 
   return { hasSetConversation, conversation, setConversation };
+}
+
+function useSetConversationAtom(key: string | number) {
+  const { setConversation } = useCreateConversationAtom(key);
+  return { setConversation };
 }
 
 function useClearConvoState() {
@@ -309,15 +370,7 @@ function useClearConvoState() {
   return clearAllConversations;
 }
 
-const conversationByKeySelector = selectorFamily({
-  key: 'conversationByKeySelector',
-  get:
-    (index: string | number) =>
-    ({ get }) => {
-      const conversation = get(conversationByIndex(index));
-      return conversation;
-    },
-});
+const conversationByKeySelector = conversationByIndex;
 
 function useClearSubmissionState() {
   const clearAllSubmissions = useRecoilCallback(
@@ -411,9 +464,16 @@ export default {
   messagesSiblingIdxFamily,
   anySubmittingSelector,
   allConversationsSelector,
+  conversationIdByIndex,
+  conversationEndpointByIndex,
+  conversationModelByIndex,
+  conversationSpecByIndex,
+  conversationAgentIdByIndex,
+  conversationAssistantIdByIndex,
   conversationByKeySelector,
   useClearConvoState,
   useCreateConversationAtom,
+  useSetConversationAtom,
   showMentionPopoverFamily,
   globalAudioURLFamily,
   activeRunFamily,

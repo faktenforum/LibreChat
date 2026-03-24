@@ -1,9 +1,12 @@
+import { Keyv } from 'keyv';
 import { logger } from '@librechat/data-schemas';
 import type { IServerConfigsRepositoryInterface } from './ServerConfigsRepositoryInterface';
 import type * as t from '~/mcp/types';
+import { MCPInspectionFailedError, isMCPDomainNotAllowedError } from '~/mcp/errors';
 import { ServerConfigsCacheFactory } from './cache/ServerConfigsCacheFactory';
 import { MCPServerInspector } from './MCPServerInspector';
 import { ServerConfigsDB } from './db/ServerConfigsDB';
+import { cacheConfig } from '~/cache/cacheConfig';
 
 /**
  * Central registry for managing MCP server configurations.
@@ -20,14 +23,37 @@ export class MCPServersRegistry {
 
   private readonly dbConfigsRepo: IServerConfigsRepositoryInterface;
   private readonly cacheConfigsRepo: IServerConfigsRepositoryInterface;
+  private readonly allowedDomains?: string[] | null;
+  private readonly readThroughCache: Keyv<t.ParsedServerConfig>;
+  private readonly readThroughCacheAll: Keyv<Record<string, t.ParsedServerConfig>>;
+  private readonly pendingGetAllPromises = new Map<
+    string,
+    Promise<Record<string, t.ParsedServerConfig>>
+  >();
 
-  constructor(mongoose: typeof import('mongoose')) {
+  constructor(mongoose: typeof import('mongoose'), allowedDomains?: string[] | null) {
     this.dbConfigsRepo = new ServerConfigsDB(mongoose);
     this.cacheConfigsRepo = ServerConfigsCacheFactory.create('App', false);
+    this.allowedDomains = allowedDomains;
+
+    const ttl = cacheConfig.MCP_REGISTRY_CACHE_TTL;
+
+    this.readThroughCache = new Keyv<t.ParsedServerConfig>({
+      namespace: 'mcp-registry-read-through',
+      ttl,
+    });
+
+    this.readThroughCacheAll = new Keyv<Record<string, t.ParsedServerConfig>>({
+      namespace: 'mcp-registry-read-through-all',
+      ttl,
+    });
   }
 
   /** Creates and initializes the singleton MCPServersRegistry instance */
-  public static createInstance(mongoose: typeof import('mongoose')): MCPServersRegistry {
+  public static createInstance(
+    mongoose: typeof import('mongoose'),
+    allowedDomains?: string[] | null,
+  ): MCPServersRegistry {
     if (!mongoose) {
       throw new Error(
         'MCPServersRegistry creation failed: mongoose instance is required for database operations. ' +
@@ -39,7 +65,7 @@ export class MCPServersRegistry {
       return MCPServersRegistry.instance;
     }
     logger.info('[MCPServersRegistry] Creating new instance');
-    MCPServersRegistry.instance = new MCPServersRegistry(mongoose);
+    MCPServersRegistry.instance = new MCPServersRegistry(mongoose, allowedDomains);
     return MCPServersRegistry.instance;
   }
 
@@ -51,24 +77,89 @@ export class MCPServersRegistry {
     return MCPServersRegistry.instance;
   }
 
+  public getAllowedDomains(): string[] | null | undefined {
+    return this.allowedDomains;
+  }
+
+  /** Returns true when no explicit allowedDomains allowlist is configured, enabling SSRF TOCTOU protection */
+  public shouldEnableSSRFProtection(): boolean {
+    return !Array.isArray(this.allowedDomains) || this.allowedDomains.length === 0;
+  }
+
   public async getServerConfig(
     serverName: string,
     userId?: string,
   ): Promise<t.ParsedServerConfig | undefined> {
+    const cacheKey = this.getReadThroughCacheKey(serverName, userId);
+
+    if (await this.readThroughCache.has(cacheKey)) {
+      return await this.readThroughCache.get(cacheKey);
+    }
+
     // First we check if any config exist with the cache
     // Yaml config are pre loaded to the cache
     const configFromCache = await this.cacheConfigsRepo.get(serverName);
-    if (configFromCache) return configFromCache;
+    if (configFromCache) {
+      await this.readThroughCache.set(cacheKey, configFromCache);
+      return configFromCache;
+    }
+
     const configFromDB = await this.dbConfigsRepo.get(serverName, userId);
-    if (configFromDB) return configFromDB;
-    return undefined;
+    await this.readThroughCache.set(cacheKey, configFromDB);
+    return configFromDB;
   }
 
   public async getAllServerConfigs(userId?: string): Promise<Record<string, t.ParsedServerConfig>> {
-    return {
+    const cacheKey = userId ?? '__no_user__';
+
+    if (await this.readThroughCacheAll.has(cacheKey)) {
+      return (await this.readThroughCacheAll.get(cacheKey)) ?? {};
+    }
+
+    const pending = this.pendingGetAllPromises.get(cacheKey);
+    if (pending) {
+      return pending;
+    }
+
+    const fetchPromise = this.fetchAllServerConfigs(cacheKey, userId);
+    this.pendingGetAllPromises.set(cacheKey, fetchPromise);
+
+    try {
+      return await fetchPromise;
+    } finally {
+      this.pendingGetAllPromises.delete(cacheKey);
+    }
+  }
+
+  private async fetchAllServerConfigs(
+    cacheKey: string,
+    userId?: string,
+  ): Promise<Record<string, t.ParsedServerConfig>> {
+    const result = {
       ...(await this.cacheConfigsRepo.getAll()),
       ...(await this.dbConfigsRepo.getAll(userId)),
     };
+
+    await this.readThroughCacheAll.set(cacheKey, result);
+    return result;
+  }
+
+  /**
+   * Stores a minimal config stub so the server remains "known" to the registry
+   * even when inspection fails at startup. This enables reinitialize to recover.
+   */
+  public async addServerStub(
+    serverName: string,
+    config: t.MCPOptions,
+    storageLocation: 'CACHE' | 'DB',
+    userId?: string,
+  ): Promise<t.AddServerResult> {
+    const configRepo = this.getConfigRepository(storageLocation);
+    const stubConfig: t.ParsedServerConfig = { ...config, inspectionFailed: true };
+    const result = await configRepo.add(serverName, stubConfig, userId);
+    await this.readThroughCache.delete(this.getReadThroughCacheKey(serverName, userId));
+    await this.readThroughCache.delete(this.getReadThroughCacheKey(serverName));
+    return result;
   }
 
   public async addServer(
@@ -80,12 +171,67 @@ export class MCPServersRegistry {
     const configRepo = this.getConfigRepository(storageLocation);
     let parsedConfig: t.ParsedServerConfig;
     try {
-      parsedConfig = await MCPServerInspector.inspect(serverName, config);
+      parsedConfig = await MCPServerInspector.inspect(
+        serverName,
+        config,
+        undefined,
+        this.allowedDomains,
+      );
     } catch (error) {
       logger.error(`[MCPServersRegistry] Failed to inspect server "${serverName}":`, error);
-      throw new Error(`MCP_INSPECTION_FAILED: Failed to connect to MCP server "${serverName}"`);
+      // Preserve domain-specific error for better error handling
+      if (isMCPDomainNotAllowedError(error)) {
+        throw error;
+      }
+      throw new MCPInspectionFailedError(serverName, error as Error);
     }
     return await configRepo.add(serverName, parsedConfig, userId);
+  }
+
+  /**
+   * Re-inspects a server that previously failed initialization.
+   * Uses the stored stub config to attempt a full inspection and replaces the stub on success.
+   */
+  public async reinspectServer(
+    serverName: string,
+    storageLocation: 'CACHE' | 'DB',
+    userId?: string,
+  ): Promise<t.AddServerResult> {
+    const configRepo = this.getConfigRepository(storageLocation);
+    const existing = await configRepo.get(serverName, userId);
+    if (!existing) {
+      throw new Error(`Server "${serverName}" not found in ${storageLocation} for reinspection.`);
+    }
+    if (!existing.inspectionFailed) {
+      throw new Error(
+        `Server "${serverName}" is not in a failed state. Use updateServer() instead.`,
+      );
+    }
+
+    const { inspectionFailed: _, ...configForInspection } = existing;
+    let parsedConfig: t.ParsedServerConfig;
+    try {
+      parsedConfig = await MCPServerInspector.inspect(
+        serverName,
+        configForInspection,
+        undefined,
+        this.allowedDomains,
+      );
+    } catch (error) {
+      logger.error(`[MCPServersRegistry] Reinspection failed for server "${serverName}":`, error);
+      if (isMCPDomainNotAllowedError(error)) {
+        throw error;
+      }
+      throw new MCPInspectionFailedError(serverName, error as Error);
+    }
+
+    const updatedConfig = { ...parsedConfig, updatedAt: Date.now() };
+    await configRepo.update(serverName, updatedConfig, userId);
+    await this.readThroughCache.delete(this.getReadThroughCacheKey(serverName, userId));
+    await this.readThroughCache.delete(this.getReadThroughCacheKey(serverName));
+    // Full clear required: getAllServerConfigs is keyed by userId with no reverse index to enumerate cached keys
+    await this.readThroughCacheAll.clear();
+    return { serverName, config: updatedConfig };
   }
 
   public async updateServer(
@@ -113,10 +259,19 @@ export class MCPServersRegistry {
 
     let parsedConfig: t.ParsedServerConfig;
     try {
-      parsedConfig = await MCPServerInspector.inspect(serverName, configForInspection);
+      parsedConfig = await MCPServerInspector.inspect(
+        serverName,
+        configForInspection,
+        undefined,
+        this.allowedDomains,
+      );
     } catch (error) {
       logger.error(`[MCPServersRegistry] Failed to inspect server "${serverName}":`, error);
-      throw new Error(`MCP_INSPECTION_FAILED: Failed to connect to MCP server "${serverName}"`);
+      // Preserve domain-specific error for better error handling
+      if (isMCPDomainNotAllowedError(error)) {
+        throw error;
+      }
+      throw new MCPInspectionFailedError(serverName, error as Error);
     }
     await configRepo.update(serverName, parsedConfig, userId);
     return parsedConfig;
@@ -132,6 +287,8 @@ export class MCPServersRegistry {
 
   public async reset(): Promise<void> {
     await this.cacheConfigsRepo.reset();
+    await this.readThroughCache.clear();
+    await this.readThroughCacheAll.clear();
   }
 
   public async removeServer(
@@ -154,5 +311,9 @@ export class MCPServersRegistry {
           `MCPServersRegistry: The provided storage location "${storageLocation}" is not supported`,
         );
     }
+  }
+
+  private getReadThroughCacheKey(serverName: string, userId?: string): string {
+    return userId ? `${serverName}::${userId}` : serverName;
   }
 }

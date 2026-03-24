@@ -1,5 +1,5 @@
 import { RefObject } from 'react';
-import { Constants, FileSources, EModelEndpoint } from 'librechat-data-provider';
+import { FileSources, EModelEndpoint, isEphemeralAgentId } from 'librechat-data-provider';
 import type { UseMutationResult } from '@tanstack/react-query';
 import type * as InputNumberPrimitive from 'rc-input-number';
 import type { SetterOrUpdater, RecoilState } from 'recoil';
@@ -10,7 +10,7 @@ import type { TranslationKeys } from '~/hooks';
 import { MCPServerDefinition } from '~/hooks/MCP/useMCPServerManager';
 
 export function isEphemeralAgent(agentId: string | null | undefined): boolean {
-  return agentId == null || agentId === '' || agentId === Constants.EPHEMERAL_AGENT_ID;
+  return isEphemeralAgentId(agentId);
 }
 
 export interface ConfigFieldDetail {
@@ -131,13 +131,6 @@ export type NavLink = {
   variant?: 'default' | 'ghost';
   id: string;
 };
-
-export interface NavProps {
-  isCollapsed: boolean;
-  links: NavLink[];
-  resize?: (size: number) => void;
-  defaultActive?: string;
-}
 
 export interface DataColumnMeta {
   meta:
@@ -356,6 +349,8 @@ export type TOptions = {
   isResubmission?: boolean;
   /** Currently only utilized when `isResubmission === true`, uses that message's currently attached files */
   overrideFiles?: t.TMessage['files'];
+  /** Added conversation for multi-convo feature - sent to server as part of submission payload */
+  addedConvo?: t.TConversation;
 };
 
 export type TAskFunction = (props: TAskProps, options?: TOptions) => void;
@@ -558,11 +553,6 @@ export interface ModelItemProps {
   icon?: JSX.Element;
   className?: string;
 }
-
-export type ContextType = {
-  navVisible: boolean;
-  setNavVisible: React.Dispatch<React.SetStateAction<boolean>>;
-};
 
 export interface SwitcherProps {
   endpoint?: t.EModelEndpoint | null;
