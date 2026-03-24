@@ -12,6 +12,19 @@ jest.mock('@librechat/agents', () => ({
 
 jest.mock('@librechat/api', () => ({
   ...jest.requireActual('@librechat/api'),
+  checkAccess: jest.fn(),
+  initializeAgent: jest.fn(),
+  createMemoryProcessor: jest.fn(),
+  loadAgent: jest.fn(),
+}));
+
+jest.mock('~/server/services/Config', () => ({
+  getMCPServerTools: jest.fn(),
+}));
+
+jest.mock('~/models', () => ({
+  getAgent: jest.fn(),
+  getRoleByName: jest.fn(),
 }));
 
 // Mock getMCPManager
@@ -252,6 +265,7 @@ describe('AgentClient - titleConvo', () => {
         transactions: {
           enabled: true,
         },
+        messageId: 'response-123',
       });
     });
 
@@ -1804,7 +1818,7 @@ describe('AgentClient - titleConvo', () => {
 
       /** Traversal stops at msg-2 (has summary), so we get msg-4 -> msg-3 -> msg-2 */
       expect(result).toHaveLength(3);
-      expect(result[0].text).toBe('Summary of conversation');
+      expect(result[0].content).toEqual([{ type: 'text', text: 'Summary of conversation' }]);
       expect(result[0].role).toBe('system');
       expect(result[0].mapped).toBe(true);
       expect(result[1].mapped).toBe(true);
@@ -2068,6 +2082,182 @@ describe('AgentClient - titleConvo', () => {
       ).resolves.not.toThrow();
 
       expect(client.options.agent.instructions).toContain(memoryContent);
+    });
+  });
+
+  describe('useMemory method - prelimAgent assignment', () => {
+    let client;
+    let mockReq;
+    let mockRes;
+    let mockAgent;
+    let mockOptions;
+    let mockCheckAccess;
+    let mockLoadAgent;
+    let mockInitializeAgent;
+    let mockCreateMemoryProcessor;
+
+    beforeEach(() => {
+      jest.clearAllMocks();
+
+      mockAgent = {
+        id: 'agent-123',
+        endpoint: EModelEndpoint.openAI,
+        provider: EModelEndpoint.openAI,
+        instructions: 'Test instructions',
+        model: 'gpt-4',
+        model_parameters: {
+          model: 'gpt-4',
+        },
+      };
+
+      mockReq = {
+        user: {
+          id: 'user-123',
+          personalization: {
+            memories: true,
+          },
+        },
+        config: {
+          memory: {
+            agent: {
+              id: 'agent-123',
+            },
+          },
+          endpoints: {
+            [EModelEndpoint.agents]: {
+              allowedProviders: [EModelEndpoint.openAI],
+            },
+          },
+        },
+      };
+
+      mockRes = {};
+
+      mockOptions = {
+        req: mockReq,
+        res: mockRes,
+        agent: mockAgent,
+      };
+
+      mockCheckAccess = require('@librechat/api').checkAccess;
+      mockLoadAgent = require('@librechat/api').loadAgent;
+      mockInitializeAgent = require('@librechat/api').initializeAgent;
+      mockCreateMemoryProcessor = require('@librechat/api').createMemoryProcessor;
+    });
+
+    it('should use current agent when memory config agent.id matches current agent id', async () => {
+      mockCheckAccess.mockResolvedValue(true);
+      mockInitializeAgent.mockResolvedValue({
+        ...mockAgent,
+        provider: EModelEndpoint.openAI,
+      });
+      mockCreateMemoryProcessor.mockResolvedValue([undefined, jest.fn()]);
+
+      client = new AgentClient(mockOptions);
+      client.conversationId = 'convo-123';
+      client.responseMessageId = 'response-123';
+
+      await client.useMemory();
+
+      expect(mockLoadAgent).not.toHaveBeenCalled();
+      expect(mockInitializeAgent).toHaveBeenCalledWith(
+        expect.objectContaining({
+          agent: mockAgent,
+        }),
+        expect.any(Object),
+      );
+    });
+
+    it('should load different agent when memory config agent.id differs from current agent id', async () => {
+      const differentAgentId = 'different-agent-456';
+      const differentAgent = {
+        id: differentAgentId,
+        provider: EModelEndpoint.openAI,
+        model: 'gpt-4',
+        instructions: 'Different agent instructions',
+      };
+
+      mockReq.config.memory.agent.id = differentAgentId;
+
+      mockCheckAccess.mockResolvedValue(true);
+      mockLoadAgent.mockResolvedValue(differentAgent);
+      mockInitializeAgent.mockResolvedValue({
+        ...differentAgent,
+        provider: EModelEndpoint.openAI,
+      });
+      mockCreateMemoryProcessor.mockResolvedValue([undefined, jest.fn()]);
+
+      client = new AgentClient(mockOptions);
+      client.conversationId = 'convo-123';
+      client.responseMessageId = 'response-123';
+
+      await client.useMemory();
+
+      expect(mockLoadAgent).toHaveBeenCalledWith(
+        expect.objectContaining({
+          agent_id: differentAgentId,
+        }),
+        expect.any(Object),
+      );
+      expect(mockInitializeAgent).toHaveBeenCalledWith(
+        expect.objectContaining({
+          agent: differentAgent,
+        }),
+        expect.any(Object),
+      );
+    });
+
+    it('should return early when prelimAgent is undefined (no valid memory agent config)', async () => {
+      mockReq.config.memory = {
+        agent: {},
+      };
+
+      mockCheckAccess.mockResolvedValue(true);
+
+      client = new AgentClient(mockOptions);
+      client.conversationId = 'convo-123';
+      client.responseMessageId = 'response-123';
+
+      const result = await client.useMemory();
+
+      expect(result).toBeUndefined();
+      expect(mockInitializeAgent).not.toHaveBeenCalled();
+      expect(mockCreateMemoryProcessor).not.toHaveBeenCalled();
+    });
+
+    it('should create ephemeral agent when no id but model and provider are specified', async () => {
+      mockReq.config.memory = {
+        agent: {
+          model: 'gpt-4',
+          provider: EModelEndpoint.openAI,
+        },
+      };
+
+      mockCheckAccess.mockResolvedValue(true);
+      mockInitializeAgent.mockResolvedValue({
+        id: Constants.EPHEMERAL_AGENT_ID,
+        model: 'gpt-4',
+        provider: EModelEndpoint.openAI,
+      });
+      mockCreateMemoryProcessor.mockResolvedValue([undefined, jest.fn()]);
+
+      client = new AgentClient(mockOptions);
+      client.conversationId = 'convo-123';
+      client.responseMessageId = 'response-123';
+
+      await client.useMemory();
+
+      expect(mockLoadAgent).not.toHaveBeenCalled();
+      expect(mockInitializeAgent).toHaveBeenCalledWith(
+        expect.objectContaining({
+          agent: expect.objectContaining({
+            id: Constants.EPHEMERAL_AGENT_ID,
+            model: 'gpt-4',
+            provider: EModelEndpoint.openAI,
+          }),
+        }),
+        expect.any(Object),
+      );
     });
   });
 });
