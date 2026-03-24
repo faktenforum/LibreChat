@@ -15,13 +15,7 @@ const {
   GenerationJobManager,
   resolveJsonSchemaRefs,
 } = require('@librechat/api');
-const {
-  Time,
-  CacheKeys,
-  Constants,
-  ContentTypes,
-  isAssistantsEndpoint,
-} = require('librechat-data-provider');
+const { Time, CacheKeys, Constants, isAssistantsEndpoint } = require('librechat-data-provider');
 const {
   getOAuthReconnectionManager,
   getMCPServersRegistry,
@@ -605,6 +599,10 @@ function createToolInstance({
         oauthEnd,
         graphTokenResolver: getGraphApiToken,
       });
+
+      if (isAssistantsEndpoint(provider) && Array.isArray(result)) {
+        return result[0];
+      }
       return result;
     } catch (error) {
       logger.error(
