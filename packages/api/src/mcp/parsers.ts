@@ -25,10 +25,6 @@ const RECOGNIZED_PROVIDERS = new Set([
   // are automatically recognized if they're not in NON_OPENAI_PROVIDERS
 ]);
 
-// Known providers that use content array format (structured content blocks)
-// These are the standard OpenAI-compatible providers plus Google and Anthropic
-const CONTENT_ARRAY_PROVIDERS = new Set(['google', 'anthropic', 'azureopenai', 'openai']);
-
 /**
  * Check if a provider should receive structured content formatting for MCP tool responses.
  * 
@@ -48,38 +44,6 @@ function isRecognizedProvider(provider: t.Provider): boolean {
   // If not explicitly recognized and not a known non-OpenAI provider,
   // assume it's an OpenAI-compatible custom endpoint
   // This automatically supports all new OpenAI-compatible providers without code changes
-  if (!NON_OPENAI_PROVIDERS.has(provider)) {
-    return true;
-  }
-  
-  return false;
-}
-
-/**
- * Check if a provider uses content array format (structured content blocks).
- * 
- * Uses array format:
- * - Standard OpenAI-compatible providers (openai, azureopenai)
- * - Google and Anthropic (native array format)
- * - New unknown custom endpoints (assumed OpenAI-compatible, so use array format)
- * 
- * Uses string format:
- * - Known custom providers with special handling (openrouter, xai, deepseek)
- * - Other non-OpenAI providers (ollama, bedrock)
- */
-function usesContentArrayFormat(provider: t.Provider): boolean {
-  // Explicit array format providers
-  if (CONTENT_ARRAY_PROVIDERS.has(provider)) {
-    return true;
-  }
-  
-  // Known custom providers that use string format (despite being OpenAI-compatible)
-  if (['openrouter', 'xai', 'deepseek'].includes(provider)) {
-    return false;
-  }
-  
-  // Unknown providers: if not a known non-OpenAI provider, assume OpenAI-compatible
-  // and use array format (like standard OpenAI endpoints)
   if (!NON_OPENAI_PROVIDERS.has(provider)) {
     return true;
   }
@@ -148,13 +112,13 @@ function parseAsString(result: t.MCPToolCallResponse): string {
 }
 
 /**
- * Converts MCPToolCallResponse content into recognized content block types
- * First element: string or formatted content (excluding image_url)
- * Second element: Recognized types - "image", "image_url", "text", "json"
+ * Converts MCPToolCallResponse content into a plain-text string plus optional artifacts
+ * (images, UI resources). All providers receive string content; images are separated into
+ * artifacts and merged back by the agents package via formatArtifactPayload / formatAnthropicArtifactContent.
  *
- * @param  result - The MCPToolCallResponse object
- * @param provider - The provider name (google, anthropic, openai)
- * @returns Tuple of content and image_urls
+ * @param provider - Used only to distinguish recognized vs. unrecognized providers.
+ * All recognized providers currently produce identical string output;
+ * provider-specific artifact merging is delegated to the agents package.
  */
 export function formatToolContent(
   result: t.MCPToolCallResponse,
@@ -166,13 +130,12 @@ export function formatToolContent(
 
   const content = result?.content ?? [];
   if (!content.length) {
-    return [[{ type: 'text', text: '(No response)' }], undefined];
+    return ['(No response)', undefined];
   }
 
-  const formattedContent: t.FormattedContent[] = [];
   const imageUrls: t.FormattedContent[] = [];
-  let currentTextBlock = '';
   const uiResources: UIResource[] = [];
+  let currentTextBlock = '';
 
   type ContentHandler = undefined | ((item: t.ToolContentPart) => void);
 
@@ -189,17 +152,11 @@ export function formatToolContent(
       if (!isImageContent(item)) {
         return;
       }
-      if (usesContentArrayFormat(provider) && currentTextBlock) {
-        formattedContent.push({ type: 'text', text: currentTextBlock });
-        currentTextBlock = '';
-      }
       const formatter = imageFormatters.default as t.ImageFormatter;
       const formattedImage = formatter(item);
 
       if (formattedImage.type === 'image_url') {
         imageUrls.push(formattedImage);
-      } else {
-        formattedContent.push(formattedImage);
       }
     },
 
@@ -262,25 +219,17 @@ UI Resource Markers Available:
     currentTextBlock += uiInstructions;
   }
 
-  if (usesContentArrayFormat(provider) && currentTextBlock) {
-    formattedContent.push({ type: 'text', text: currentTextBlock });
-  }
-
   let artifacts: t.Artifacts = undefined;
-  if (imageUrls.length) {
+  if (imageUrls.length > 0) {
     artifacts = { content: imageUrls };
   }
 
-  if (uiResources.length) {
+  if (uiResources.length > 0) {
     artifacts = {
       ...artifacts,
       [Tools.ui_resources]: { data: uiResources },
     };
   }
 
-  if (usesContentArrayFormat(provider)) {
-    return [formattedContent, artifacts];
-  }
-
-  return [currentTextBlock, artifacts];
+  return [currentTextBlock || (artifacts !== undefined ? '' : '(No response)'), artifacts];
 }
