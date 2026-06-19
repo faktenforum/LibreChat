@@ -1,14 +1,12 @@
 import { useCallback, useEffect, useState, useMemo, memo, lazy, Suspense, useRef } from 'react';
-import { useQueryClient } from '@tanstack/react-query';
 import { useSetRecoilState, useRecoilValue } from 'recoil';
-import { useMediaQuery, NewChatIcon } from '@librechat/client';
-import { PermissionTypes, Permissions, QueryKeys } from 'librechat-data-provider';
+import { useMediaQuery } from '@librechat/client';
+import { PermissionTypes, Permissions } from 'librechat-data-provider';
 import type { InfiniteQueryObserverResult } from '@tanstack/react-query';
 import type { ConversationListResponse } from 'librechat-data-provider';
 import type { List } from 'react-virtualized';
 import {
   useLocalize,
-  useNewConvo,
   useHasAccess,
   useAuthContext,
   useLocalStorage,
@@ -16,19 +14,17 @@ import {
 } from '~/hooks';
 import { useConversationsInfiniteQuery, useTitleGeneration } from '~/data-provider';
 import { Conversations } from '~/components/Conversations';
+import ProjectsSection from '~/components/Conversations/ProjectsSection';
+import FavoritesList from '~/components/Nav/Favorites/FavoritesList';
 import SearchBar from '~/components/Nav/SearchBar';
-import { clearMessagesCache } from '~/utils';
 import store from '~/store';
 
 const BookmarkNav = lazy(() => import('~/components/Nav/Bookmarks/BookmarkNav'));
 
 const ConversationsSection = memo(() => {
   const localize = useLocalize();
-  const queryClient = useQueryClient();
-  const { newConversation } = useNewConvo();
   const isSmallScreen = useMediaQuery('(max-width: 768px)');
   const setSidebarExpanded = useSetRecoilState(store.sidebarExpanded);
-  const conversation = useRecoilValue(store.conversationByIndex(0));
   const { isAuthenticated } = useAuthContext();
   useTitleGeneration(isAuthenticated);
 
@@ -110,7 +106,7 @@ const ConversationsSection = memo(() => {
 
   return (
     <div
-      className="flex h-full min-h-0 flex-col overflow-hidden pb-3"
+      className="flex h-full min-h-0 flex-col overflow-hidden pb-3 pt-2"
       role="region"
       aria-label={localize('com_ui_chat_history')}
     >
@@ -120,34 +116,14 @@ const ConversationsSection = memo(() => {
             <BookmarkNav tags={tags} setTags={setTags} />
           </Suspense>
         )}
-        <SearchBar isSmallScreen={isSmallScreen} />
+        {search.enabled && <SearchBar isSmallScreen={isSmallScreen} />}
       </div>
-      {isSmallScreen && (
-        <div
-          role="button"
-          tabIndex={0}
-          aria-label={localize('com_ui_new_chat')}
-          className="flex w-full cursor-pointer items-center rounded-lg px-2.5 py-2 text-sm text-text-primary outline-none hover:bg-surface-active-alt focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-black dark:focus-visible:ring-white"
-          onClick={() => {
-            clearMessagesCache(queryClient, conversation?.conversationId);
-            queryClient.invalidateQueries([QueryKeys.messages]);
-            newConversation();
-            setSidebarExpanded(false);
-          }}
-          onKeyDown={(e) => {
-            if (e.key === 'Enter' || e.key === ' ') {
-              e.preventDefault();
-              clearMessagesCache(queryClient, conversation?.conversationId);
-              queryClient.invalidateQueries([QueryKeys.messages]);
-              newConversation();
-              setSidebarExpanded(false);
-            }
-          }}
-        >
-          <NewChatIcon className="mr-2 h-5 w-5" />
-          <span className="truncate">{localize('com_ui_new_chat')}</span>
+      {!search.query && (
+        <div className="px-3">
+          <FavoritesList isSmallScreen={isSmallScreen} toggleNav={toggleNav} />
         </div>
       )}
+      {!search.query && <ProjectsSection toggleNav={toggleNav} isAuthenticated={isAuthenticated} />}
       <div className="flex min-h-0 flex-grow flex-col overflow-hidden">
         <Conversations
           conversations={conversations}
@@ -159,6 +135,7 @@ const ConversationsSection = memo(() => {
           isSearchLoading={isSearchLoading}
           isChatsExpanded={isChatsExpanded}
           setIsChatsExpanded={setIsChatsExpanded}
+          showFavorites={false}
         />
       </div>
     </div>

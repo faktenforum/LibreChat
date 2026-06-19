@@ -30,18 +30,32 @@ describe('formatToolContent', () => {
       expect(artifacts).toBeUndefined();
     });
 
-    it('should return string for known non-OpenAI providers', () => {
+    // Adjusted for our auto-detect: a provider not in NON_OPENAI_PROVIDERS (like an
+    // arbitrary "unknown" endpoint) is treated as OpenAI-compatible, so an image is
+    // extracted to artifacts instead of being stringified. Upstream's whitelist-only
+    // behavior would stringify the payload here, but that conflicts with Scaleway support.
+    it('should extract the image to artifacts for auto-detected (non-blocklisted) providers', () => {
       const result: t.MCPToolCallResponse = {
-        content: [{ type: 'text', text: 'Test content' }],
+        content: [{ type: 'image', data: 'iVBORw0KGgoAAAA...', mimeType: 'image/png' }],
       };
-      const [content] = formatToolContent(result, 'google' as t.Provider);
-      // Google is recognized but uses array format, so this should be an array
-      expect(Array.isArray(content)).toBe(true);
+
+      const [content, artifacts] = formatToolContent(result, 'unknown' as t.Provider);
+
+      expect(content).toBe('');
+      expect(artifacts).toEqual({
+        content: [
+          {
+            type: 'image_url',
+            image_url: { url: 'data:image/png;base64,iVBORw0KGgoAAAA...' },
+          },
+        ],
+      });
     });
+
   });
 
   describe('automatic detection of OpenAI-compatible custom endpoints', () => {
-    it('should automatically recognize new OpenAI-compatible custom endpoints', () => {
+    it('should automatically recognize custom endpoints not in the whitelist', () => {
       const result: t.MCPToolCallResponse = {
         content: [
           { type: 'text', text: 'First text' },
@@ -49,15 +63,14 @@ describe('formatToolContent', () => {
         ],
       };
 
-      // Test with a custom endpoint that's not explicitly listed
+      // scaleway is not in RECOGNIZED_PROVIDERS but is OpenAI-compatible,
+      // so the blocklist (NON_OPENAI_PROVIDERS) path must recognize it.
       const [content, artifacts] = formatToolContent(result, 'scaleway' as t.Provider);
-      // Should be recognized and use array format (OpenAI-compatible)
-      expect(Array.isArray(content)).toBe(true);
-      expect(content).toEqual([{ type: 'text', text: 'First text\n\nSecond text' }]);
+      expect(content).toBe('First text\n\nSecond text');
       expect(artifacts).toBeUndefined();
     });
 
-    it('should use array format for unknown OpenAI-compatible endpoints', () => {
+    it('should extract images to artifacts for auto-detected custom endpoints', () => {
       const result: t.MCPToolCallResponse = {
         content: [
           { type: 'text', text: 'Before image' },
@@ -66,14 +79,9 @@ describe('formatToolContent', () => {
         ],
       };
 
-      // Test with another custom endpoint (e.g., together, perplexity, anyscale)
+      // Another custom endpoint (e.g. together, perplexity) is treated like OpenAI.
       const [content, artifacts] = formatToolContent(result, 'together' as t.Provider);
-      // Should use array format like OpenAI
-      expect(Array.isArray(content)).toBe(true);
-      expect(content).toEqual([
-        { type: 'text', text: 'Before image' },
-        { type: 'text', text: 'After image' },
-      ]);
+      expect(content).toBe('Before image\n\nAfter image');
       expect(artifacts).toEqual({
         content: [
           {
@@ -84,12 +92,13 @@ describe('formatToolContent', () => {
       });
     });
 
-    it('should NOT recognize known non-OpenAI providers', () => {
+    it('should not treat known non-OpenAI providers as auto-detected custom endpoints', () => {
       const result: t.MCPToolCallResponse = {
         content: [{ type: 'text', text: 'Test content' }],
       };
 
-      // Non-OpenAI providers should return string format
+      // bedrock is in NON_OPENAI_PROVIDERS but also in RECOGNIZED_PROVIDERS,
+      // so it is recognized via the whitelist and produces unified string output.
       const [content, artifacts] = formatToolContent(result, 'bedrock' as t.Provider);
       expect(typeof content).toBe('string');
       expect(content).toBe('Test content');
@@ -157,6 +166,16 @@ describe('formatToolContent', () => {
   });
 
   describe('image handling', () => {
+    const originalMaxImageBytes = process.env.MCP_IMAGE_DATA_MAX_BYTES;
+
+    afterEach(() => {
+      if (originalMaxImageBytes === undefined) {
+        delete process.env.MCP_IMAGE_DATA_MAX_BYTES;
+        return;
+      }
+      process.env.MCP_IMAGE_DATA_MAX_BYTES = originalMaxImageBytes;
+    });
+
     it('should handle images with http URLs', () => {
       const result: t.MCPToolCallResponse = {
         content: [{ type: 'image', data: 'https://example.com/image.png', mimeType: 'image/png' }],
@@ -212,6 +231,83 @@ describe('formatToolContent', () => {
       expect(content).toBe('');
       expect(artifacts).toBeDefined();
       expect(artifacts?.content).toHaveLength(2);
+    });
+
+    it('should reject oversized base64 image data before creating artifacts', () => {
+      process.env.MCP_IMAGE_DATA_MAX_BYTES = '3';
+      const result: t.MCPToolCallResponse = {
+        content: [{ type: 'image', data: 'QUJDRA==', mimeType: 'image/png' }],
+      };
+
+      expect(() => formatToolContent(result, 'openai')).toThrow(
+        'MCP image result exceeds maximum size of 3 bytes',
+      );
+    });
+
+    it('should allow base64 image data when decoded size is within the cap', () => {
+      process.env.MCP_IMAGE_DATA_MAX_BYTES = '4';
+      const result: t.MCPToolCallResponse = {
+        content: [{ type: 'image', data: 'QUJDRA==', mimeType: 'image/png' }],
+      };
+
+      const [content, artifacts] = formatToolContent(result, 'openai');
+
+      expect(content).toBe('');
+      expect(artifacts?.content?.[0]).toEqual({
+        type: 'image_url',
+        image_url: { url: 'data:image/png;base64,QUJDRA==' },
+      });
+    });
+
+    it('should reject oversized image data for unrecognized providers before stringifying', () => {
+      process.env.MCP_IMAGE_DATA_MAX_BYTES = '3';
+      const result: t.MCPToolCallResponse = {
+        content: [{ type: 'image', data: 'QUJDRA==', mimeType: 'image/png' }],
+      };
+
+      expect(() => formatToolContent(result, 'unknown' as t.Provider)).toThrow(
+        'MCP image result exceeds maximum size of 3 bytes',
+      );
+    });
+
+    it('should not apply the image data cap to remote image URLs', () => {
+      process.env.MCP_IMAGE_DATA_MAX_BYTES = '3';
+      const result: t.MCPToolCallResponse = {
+        content: [{ type: 'image', data: 'https://example.com/large.png', mimeType: 'image/png' }],
+      };
+
+      const [content, artifacts] = formatToolContent(result, 'openai');
+
+      expect(content).toBe('');
+      expect(artifacts?.content?.[0]).toEqual({
+        type: 'image_url',
+        image_url: { url: 'https://example.com/large.png' },
+      });
+    });
+
+    it('should enforce the image cap on base64 data that merely starts with "http"', () => {
+      process.env.MCP_IMAGE_DATA_MAX_BYTES = '3';
+      const result: t.MCPToolCallResponse = {
+        content: [{ type: 'image', data: 'httpAAAAAAAA', mimeType: 'image/png' }],
+      };
+
+      expect(() => formatToolContent(result, 'openai')).toThrow(
+        'MCP image result exceeds maximum size of 3 bytes',
+      );
+    });
+
+    it('should treat base64 starting with "http" as inline data, not a remote URL', () => {
+      const result: t.MCPToolCallResponse = {
+        content: [{ type: 'image', data: 'httpAAAA', mimeType: 'image/png' }],
+      };
+
+      const [content, artifacts] = formatToolContent(result, 'openai');
+
+      expect(content).toBe('');
+      expect(artifacts?.content?.[0]).toEqual({
+        type: 'image_url',
+        image_url: { url: 'data:image/png;base64,httpAAAA' },
+      });
     });
   });
 

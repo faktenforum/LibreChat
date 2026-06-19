@@ -59,10 +59,8 @@ function AgentSelect({
         icon: isGlobal ? <EarthIcon className={'icon-lg text-green-400'} /> : null,
       };
 
-      // Get vision from top-level agent or from latest version if not present
-      // If not explicitly set, automatically determine from model
-      const explicitVision =
-        fullAgent.vision ?? fullAgent.versions?.[fullAgent.versions.length - 1]?.vision;
+      // Use the agent's explicit vision flag; if unset, auto-detect from the model
+      const explicitVision = fullAgent.vision;
       const agentModel =
         (fullAgent.model_parameters as { model?: string })?.model ?? fullAgent.model;
       const agentVision =
@@ -72,7 +70,6 @@ function AgentSelect({
             ? validateVisionModel({
                 model: agentModel,
                 modelSpecs: startupConfig?.modelSpecs,
-                availableModels: startupConfig?.availableModels,
               })
             : false;
 
@@ -129,7 +126,26 @@ function AgentSelect({
           return;
         }
 
+        if (
+          name === 'skills' &&
+          Array.isArray(value) &&
+          value.every((item) => typeof item === 'string')
+        ) {
+          formValues[name] = value;
+          return;
+        }
+
+        if (name === 'skills_enabled' && typeof value === 'boolean') {
+          formValues[name] = value;
+          return;
+        }
+
         if (name === 'edges' && Array.isArray(value)) {
+          formValues[name] = value;
+          return;
+        }
+
+        if (name === 'subagents' && typeof value === 'object' && value !== null) {
           formValues[name] = value;
           return;
         }

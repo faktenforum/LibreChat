@@ -69,7 +69,9 @@ const DragDropModal = ({ onOptionSelect, setShowModal, files, isVisible }: DragD
     const getFileType = (file: File) => inferMimeType(file.name, file.type);
 
     const isAzureWithResponsesApi =
-      currentProvider === EModelEndpoint.azureOpenAI && useResponsesApi;
+      (currentProvider === EModelEndpoint.azureOpenAI ||
+        endpointType === EModelEndpoint.azureOpenAI) &&
+      useResponsesApi === true;
 
     // Check if provider supports document upload
     if (
@@ -124,7 +126,7 @@ const DragDropModal = ({ onOptionSelect, setShowModal, files, isVisible }: DragD
     }
     if (capabilities.codeEnabled && codeAllowedByAgent) {
       _options.push({
-        label: localize('com_ui_upload_code_files'),
+        label: localize('com_ui_upload_code_environment'),
         value: EToolResources.execute_code,
         icon: <TerminalSquareIcon className="icon-md" />,
       });

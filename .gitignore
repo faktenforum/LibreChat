@@ -63,6 +63,7 @@ bower_components/
 .clineignore
 .cursor
 .aider*
+.bg-shell/
 
 # Floobits
 .floo
@@ -87,6 +88,7 @@ archive
 .vscode/settings.json
 src/style - official.css
 /e2e/specs/.test-results/
+/e2e/.generated/
 /e2e/playwright-report/
 /playwright/.cache/
 .DS_Store
@@ -129,12 +131,14 @@ helm/**/charts/
 helm/**/.values.yaml
 
 !/client/src/@types/i18next.d.ts
+!/client/src/@types/react.d.ts
 
 # SAML Idp cert
 *.cert
 
 # AI Assistants
 /.claude/
+/.codex/
 /.cursor/
 /.copilot/
 /.aider/
@@ -142,7 +146,6 @@ helm/**/.values.yaml
 /.tabnine/
 /.codeium
 *.local.md
-
 
 # Removed Windows wrapper files per user request
 hive-mind-prompt-*.txt
@@ -175,3 +178,4 @@ claude-flow
 # Removed Windows wrapper files per user request
 hive-mind-prompt-*.txt
 CLAUDE.md
+.gsd
