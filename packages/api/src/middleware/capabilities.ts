@@ -6,19 +6,17 @@ import {
   SystemCapabilities,
   readConfigCapability,
 } from '@librechat/data-schemas';
-import type { PrincipalType } from 'librechat-data-provider';
 import type { SystemCapability, ConfigSection } from '@librechat/data-schemas';
 import type { NextFunction, Response } from 'express';
-import type { Types } from 'mongoose';
+import type { Types, ClientSession } from 'mongoose';
+import type { ResolvedPrincipal } from '~/types/principal';
 import type { ServerRequest } from '~/types/http';
 
-interface ResolvedPrincipal {
-  principalType: PrincipalType;
-  principalId?: string | Types.ObjectId;
-}
-
 interface CapabilityDeps {
-  getUserPrincipals: (params: { userId: string; role: string }) => Promise<ResolvedPrincipal[]>;
+  getUserPrincipals: (
+    params: { userId: string | Types.ObjectId; role?: string | null },
+    session?: ClientSession,
+  ) => Promise<ResolvedPrincipal[]>;
   hasCapabilityForPrincipals: (params: {
     principals: ResolvedPrincipal[];
     capability: SystemCapability;
@@ -26,7 +24,7 @@ interface CapabilityDeps {
   }) => Promise<boolean>;
 }
 
-interface CapabilityUser {
+export interface CapabilityUser {
   id: string;
   role: string;
   tenantId?: string;
@@ -36,6 +34,10 @@ interface CapabilityStore {
   principals: Map<string, ResolvedPrincipal[]>;
   results: Map<string, boolean>;
 }
+
+const DENIAL_WARN_INTERVAL_MS = 5 * 60 * 1000;
+const MAX_DENIAL_WARN_KEYS = 1000;
+const recentDenialWarnings = new Map<string, number>();
 
 export type HasCapabilityFn = (
   user: CapabilityUser,
@@ -48,7 +50,7 @@ export type RequireCapabilityFn = (
 
 export type HasConfigCapabilityFn = (
   user: CapabilityUser,
-  section: ConfigSection,
+  section: ConfigSection | null,
   verb?: 'manage' | 'read',
 ) => Promise<boolean>;
 
@@ -60,7 +62,8 @@ export type HasConfigCapabilityFn = (
  * Outside a request context (background jobs, tests), the store is undefined
  * and every check falls through to the database — correct behavior.
  */
-export const capabilityStore = new AsyncLocalStorage<CapabilityStore>();
+export const capabilityStore: AsyncLocalStorage<CapabilityStore> =
+  new AsyncLocalStorage<CapabilityStore>();
 
 export function capabilityContextMiddleware(
   _req: ServerRequest,
@@ -75,6 +78,38 @@ export function capabilityContextMiddleware(
     );
   }
   capabilityStore.run({ principals: new Map(), results: new Map() }, next);
+}
+
+function warnDeniedCapabilityOnce(key: string, message: string): void {
+  const now = Date.now();
+  const lastLoggedAt = recentDenialWarnings.get(key);
+  if (lastLoggedAt !== undefined && now - lastLoggedAt < DENIAL_WARN_INTERVAL_MS) {
+    return;
+  }
+
+  if (recentDenialWarnings.size >= MAX_DENIAL_WARN_KEYS) {
+    const oldestKey = recentDenialWarnings.keys().next().value;
+    if (oldestKey !== undefined) {
+      recentDenialWarnings.delete(oldestKey);
+    }
+  }
+
+  recentDenialWarnings.set(key, now);
+  logger.warn(message);
+}
+
+/**
+ * Reads principals from the per-request ALS cache without side effects.
+ * Returns `undefined` when called outside a request context or before
+ * `requireCapability` has populated the cache for this user.
+ */
+export function getCachedPrincipals(user: CapabilityUser): ResolvedPrincipal[] | undefined {
+  const store = capabilityStore.getStore();
+  if (!store) {
+    return undefined;
+  }
+  const key = `${user.id}:${user.role}:${user.tenantId ?? ''}`;
+  return store.principals.get(key);
 }
 
 /**
@@ -138,11 +173,14 @@ export function generateCapabilityCheck(deps: CapabilityDeps): {
    */
   async function hasConfigCapability(
     user: CapabilityUser,
-    section: ConfigSection,
+    section: ConfigSection | null,
     verb: 'manage' | 'read' = 'manage',
   ): Promise<boolean> {
     const broadCap =
       verb === 'manage' ? SystemCapabilities.MANAGE_CONFIGS : SystemCapabilities.READ_CONFIGS;
+    if (section == null) {
+      return hasCapability(user, broadCap);
+    }
     if (await hasCapability(user, broadCap)) {
       return true;
     }
@@ -176,6 +214,10 @@ export function generateCapabilityCheck(deps: CapabilityDeps): {
           return;
         }
 
+        warnDeniedCapabilityOnce(
+          `missing-capability:${id}:${capability}`,
+          `[requireCapability] Forbidden: user ${id} missing capability '${capability}'`,
+        );
         res.status(403).json({ message: 'Forbidden' });
       } catch (err) {
         logger.error(`[requireCapability] Error checking capability: ${capability}`, err);

@@ -1,6 +1,7 @@
 import { AgentCapabilities, ArtifactModes } from 'librechat-data-provider';
 import type {
   AgentModelParameters,
+  AgentSubagentsConfig,
   AgentToolOptions,
   SupportContact,
   AgentProvider,
@@ -23,7 +24,7 @@ export type TAgentCapabilities = {
   [AgentCapabilities.web_search]: boolean;
   [AgentCapabilities.file_search]: boolean;
   [AgentCapabilities.execute_code]: boolean;
-  [AgentCapabilities.vision]: boolean;
+  [AgentCapabilities.vision]?: boolean;
   [AgentCapabilities.end_after_tools]?: boolean;
   [AgentCapabilities.hide_sequential_outputs]?: boolean;
 };
@@ -39,10 +40,13 @@ export type AgentForm = {
   tools?: string[];
   /** Per-tool configuration options (deferred loading, allowed callers, etc.) */
   tool_options?: AgentToolOptions;
+  skills?: string[];
+  skills_enabled?: boolean;
   provider?: AgentProvider | OptionWithIcon;
   /** @deprecated Use edges instead */
   agent_ids?: string[];
   edges?: GraphEdge[];
+  subagents?: AgentSubagentsConfig;
   [AgentCapabilities.artifacts]?: ArtifactModes | string;
   recursion_limit?: number;
   support_contact?: SupportContact;

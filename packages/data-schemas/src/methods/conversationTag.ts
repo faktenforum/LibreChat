@@ -1,4 +1,5 @@
 import type { Model } from 'mongoose';
+import { tenantSafeBulkWrite } from '~/utils/tenantBulkWrite';
 import logger from '~/config/winston';
 
 interface IConversationTag {
@@ -11,11 +12,111 @@ interface IConversationTag {
   [key: string]: unknown;
 }
 
-export function createConversationTagMethods(mongoose: typeof import('mongoose')) {
+export function createConversationTagMethods(mongoose: typeof import('mongoose')): {
+  getConversationTags: (user: string) => Promise<
+    (import('mongoose').FlattenMaps<{
+      [x: string]: unknown;
+      user: string;
+      tag: string;
+      description?: string | undefined;
+      position: number;
+      count: number;
+      createdAt?: Date | undefined;
+    }> & {
+      _id: import('mongoose').Types.ObjectId;
+    } & {
+      __v: number;
+    })[]
+  >;
+  createConversationTag: (
+    user: string,
+    data: {
+      tag: string;
+      description?: string;
+      addToConversation?: boolean;
+      conversationId?: string;
+    },
+  ) => Promise<
+    | (import('mongoose').FlattenMaps<{
+        [x: string]: unknown;
+        user: string;
+        tag: string;
+        description?: string | undefined;
+        position: number;
+        count: number;
+        createdAt?: Date | undefined;
+      }> & {
+        _id: import('mongoose').Types.ObjectId;
+      } & {
+        __v: number;
+      })
+    | null
+  >;
+  updateConversationTag: (
+    user: string,
+    oldTag: string,
+    data: { tag?: string; description?: string; position?: number },
+  ) => Promise<
+    | (import('mongoose').FlattenMaps<{
+        [x: string]: unknown;
+        user: string;
+        tag: string;
+        description?: string | undefined;
+        position: number;
+        count: number;
+        createdAt?: Date | undefined;
+      }> & {
+        _id: import('mongoose').Types.ObjectId;
+      } & {
+        __v: number;
+      })
+    | null
+  >;
+  deleteConversationTag: (
+    user: string,
+    tag: string,
+  ) => Promise<
+    | (import('mongoose').FlattenMaps<{
+        [x: string]: unknown;
+        user: string;
+        tag: string;
+        description?: string | undefined;
+        position: number;
+        count: number;
+        createdAt?: Date | undefined;
+      }> & {
+        _id: import('mongoose').Types.ObjectId;
+      } & {
+        __v: number;
+      })
+    | null
+  >;
+  deleteConversationTags: (filter: Record<string, unknown>) => Promise<number>;
+  bulkIncrementTagCounts: (user: string, tags: string[]) => Promise<void>;
+  updateTagsForConversation: (
+    user: string,
+    conversationId: string,
+    tags: string[],
+  ) => Promise<string[]>;
+} {
   /**
    * Retrieves all conversation tags for a user.
    */
-  async function getConversationTags(user: string) {
+  async function getConversationTags(user: string): Promise<
+    (import('mongoose').FlattenMaps<{
+      [x: string]: unknown;
+      user: string;
+      tag: string;
+      description?: string | undefined;
+      position: number;
+      count: number;
+      createdAt?: Date | undefined;
+    }> & {
+      _id: import('mongoose').Types.ObjectId;
+    } & {
+      __v: number;
+    })[]
+  > {
     try {
       const ConversationTag = mongoose.models.ConversationTag as Model<IConversationTag>;
       return await ConversationTag.find({ user }).sort({ position: 1 }).lean();
@@ -36,7 +137,22 @@ export function createConversationTagMethods(mongoose: typeof import('mongoose')
       addToConversation?: boolean;
       conversationId?: string;
     },
-  ) {
+  ): Promise<
+    | (import('mongoose').FlattenMaps<{
+        [x: string]: unknown;
+        user: string;
+        tag: string;
+        description?: string | undefined;
+        position: number;
+        count: number;
+        createdAt?: Date | undefined;
+      }> & {
+        _id: import('mongoose').Types.ObjectId;
+      } & {
+        __v: number;
+      })
+    | null
+  > {
     try {
       const ConversationTag = mongoose.models.ConversationTag as Model<IConversationTag>;
       const Conversation = mongoose.models.Conversation;
@@ -115,7 +231,22 @@ export function createConversationTagMethods(mongoose: typeof import('mongoose')
     user: string,
     oldTag: string,
     data: { tag?: string; description?: string; position?: number },
-  ) {
+  ): Promise<
+    | (import('mongoose').FlattenMaps<{
+        [x: string]: unknown;
+        user: string;
+        tag: string;
+        description?: string | undefined;
+        position: number;
+        count: number;
+        createdAt?: Date | undefined;
+      }> & {
+        _id: import('mongoose').Types.ObjectId;
+      } & {
+        __v: number;
+      })
+    | null
+  > {
     try {
       const ConversationTag = mongoose.models.ConversationTag as Model<IConversationTag>;
       const Conversation = mongoose.models.Conversation;
@@ -160,7 +291,25 @@ export function createConversationTagMethods(mongoose: typeof import('mongoose')
   /**
    * Deletes a conversation tag.
    */
-  async function deleteConversationTag(user: string, tag: string) {
+  async function deleteConversationTag(
+    user: string,
+    tag: string,
+  ): Promise<
+    | (import('mongoose').FlattenMaps<{
+        [x: string]: unknown;
+        user: string;
+        tag: string;
+        description?: string | undefined;
+        position: number;
+        count: number;
+        createdAt?: Date | undefined;
+      }> & {
+        _id: import('mongoose').Types.ObjectId;
+      } & {
+        __v: number;
+      })
+    | null
+  > {
     try {
       const ConversationTag = mongoose.models.ConversationTag as Model<IConversationTag>;
       const Conversation = mongoose.models.Conversation;
@@ -187,7 +336,11 @@ export function createConversationTagMethods(mongoose: typeof import('mongoose')
   /**
    * Updates tags for a specific conversation.
    */
-  async function updateTagsForConversation(user: string, conversationId: string, tags: string[]) {
+  async function updateTagsForConversation(
+    user: string,
+    conversationId: string,
+    tags: string[],
+  ): Promise<string[]> {
     try {
       const ConversationTag = mongoose.models.ConversationTag as Model<IConversationTag>;
       const Conversation = mongoose.models.Conversation;
@@ -233,7 +386,7 @@ export function createConversationTagMethods(mongoose: typeof import('mongoose')
       }
 
       if (bulkOps.length > 0) {
-        await ConversationTag.bulkWrite(bulkOps);
+        await tenantSafeBulkWrite(ConversationTag, bulkOps);
       }
 
       const updatedConversation = (
@@ -254,7 +407,7 @@ export function createConversationTagMethods(mongoose: typeof import('mongoose')
   /**
    * Increments tag counts for existing tags only.
    */
-  async function bulkIncrementTagCounts(user: string, tags: string[]) {
+  async function bulkIncrementTagCounts(user: string, tags: string[]): Promise<void> {
     if (!tags || tags.length === 0) {
       return;
     }
@@ -273,7 +426,7 @@ export function createConversationTagMethods(mongoose: typeof import('mongoose')
         },
       }));
 
-      const result = await ConversationTag.bulkWrite(bulkOps);
+      const result = await tenantSafeBulkWrite(ConversationTag, bulkOps);
       if (result && result.modifiedCount > 0) {
         logger.debug(
           `user: ${user} | Incremented tag counts - modified ${result.modifiedCount} tags`,
