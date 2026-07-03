@@ -123,6 +123,14 @@ export type FileSearchSource = {
   [key: string]: unknown;
 };
 
+/** Provider cost of a tool call, reported via the MCP result `_meta.cost`. */
+export type ToolCost = {
+  /** Cost in USD (e.g. OpenRouter credits are 1:1 USD). */
+  usd: number;
+  model?: string;
+  provider?: string;
+};
+
 export type Artifacts =
   | {
       content?: FormattedContent[];
@@ -137,6 +145,7 @@ export type Artifacts =
       files?: Array<{ id: string; name: string }>;
       session_id?: string;
       file_ids?: string[];
+      cost?: ToolCost;
     }
   | undefined;
 
