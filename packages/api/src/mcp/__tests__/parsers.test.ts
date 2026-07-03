@@ -54,6 +54,41 @@ describe('formatToolContent', () => {
 
   });
 
+  describe('tool cost from _meta', () => {
+    it('attaches a reported cost to the artifacts', () => {
+      const result: t.MCPToolCallResponse = {
+        content: [{ type: 'image', data: 'AAAA', mimeType: 'image/png' }],
+        _meta: { cost: { usd: 0.0387, model: 'google/gemini-2.5-flash-image', provider: 'openrouter' } },
+      };
+      const [, artifacts] = formatToolContent(result, 'openai');
+      expect(artifacts?.cost).toEqual({
+        usd: 0.0387,
+        model: 'google/gemini-2.5-flash-image',
+        provider: 'openrouter',
+      });
+    });
+
+    it('attaches cost even when there is no image artifact', () => {
+      const result: t.MCPToolCallResponse = {
+        content: [{ type: 'text', text: 'done' }],
+        _meta: { cost: { usd: 0.02 } },
+      };
+      const [, artifacts] = formatToolContent(result, 'openai');
+      expect(artifacts?.cost).toEqual({ usd: 0.02, model: undefined, provider: undefined });
+    });
+
+    it('ignores a non-positive or malformed cost', () => {
+      for (const badCost of [{ usd: 0 }, { usd: -1 }, { usd: 'x' }, {}, null]) {
+        const result: t.MCPToolCallResponse = {
+          content: [{ type: 'text', text: 'done' }],
+          _meta: { cost: badCost },
+        };
+        const [, artifacts] = formatToolContent(result, 'openai');
+        expect(artifacts?.cost).toBeUndefined();
+      }
+    });
+  });
+
   describe('automatic detection of OpenAI-compatible custom endpoints', () => {
     it('should automatically recognize custom endpoints not in the whitelist', () => {
       const result: t.MCPToolCallResponse = {

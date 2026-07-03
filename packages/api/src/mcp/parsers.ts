@@ -278,5 +278,31 @@ UI Resource Markers Available:
     };
   }
 
+  const cost = parseToolCost(result?._meta);
+  if (cost) {
+    artifacts = { ...artifacts, cost };
+  }
+
   return [currentTextBlock || (artifacts !== undefined ? '' : '(No response)'), artifacts];
+}
+
+/**
+ * Reads a provider cost reported by the MCP server under `_meta.cost`.
+ * LibreChat bills this against the user's balance (see the tool-end callback).
+ */
+function parseToolCost(meta: Record<string, unknown> | undefined): t.ToolCost | undefined {
+  const raw = meta?.cost;
+  if (raw == null || typeof raw !== 'object') {
+    return undefined;
+  }
+  const candidate = raw as { usd?: unknown; model?: unknown; provider?: unknown };
+  const usd = typeof candidate.usd === 'number' ? candidate.usd : Number(candidate.usd);
+  if (!Number.isFinite(usd) || usd <= 0) {
+    return undefined;
+  }
+  return {
+    usd,
+    model: typeof candidate.model === 'string' ? candidate.model : undefined,
+    provider: typeof candidate.provider === 'string' ? candidate.provider : undefined,
+  };
 }

@@ -15,9 +15,11 @@ const {
 } = require('@librechat/agents');
 const {
   sendEvent,
+  getBalanceConfig,
   computeUsageCostUSD,
   GenerationJobManager,
   writeAttachmentEvent,
+  getTransactionsConfig,
   createToolExecuteHandler,
   HOST_FILE_AUTHORING_ARTIFACT_KEY,
   isCodeSessionToolName,
@@ -25,6 +27,48 @@ const {
 const { processFileCitations } = require('~/server/services/Files/Citations');
 const { processCodeOutput, runPreviewFinalize } = require('~/server/services/Files/Code/process');
 const { saveBase64Image } = require('~/server/services/Files/process');
+const { spendTokens } = require('~/models');
+
+/** LibreChat balance credits per USD (1,000,000 credits = $1). */
+const CREDITS_PER_USD = 1_000_000;
+
+/**
+ * Bills a tool's reported provider cost (MCP `_meta.cost`, e.g. OpenRouter image
+ * generation) against the user's balance. The USD cost is charged exactly by
+ * recording a completion of `usd * 1e6` credits at rate 1 (endpointTokenConfig
+ * override), so it lands in the transactions collection and spend-monitor.
+ * @returns {Promise<null>}
+ */
+async function recordToolCost({ req, cost, toolName, metadata }) {
+  const userId = req?.user?.id;
+  const usd = Number(cost?.usd);
+  if (!userId || !Number.isFinite(usd) || usd <= 0) {
+    return null;
+  }
+  const appConfig = req?.config;
+  const balance = getBalanceConfig(appConfig);
+  const transactions = getTransactionsConfig(appConfig);
+  if (!balance?.enabled && transactions?.enabled === false) {
+    return null;
+  }
+  const model = cost.model || toolName;
+  const credits = Math.round(usd * CREDITS_PER_USD);
+  await spendTokens(
+    {
+      user: userId,
+      model,
+      conversationId: metadata?.thread_id,
+      messageId: metadata?.run_id,
+      context: 'image_generation',
+      balance,
+      transactions,
+      endpointTokenConfig: { [model]: { prompt: 1, completion: 1 } },
+    },
+    { completionTokens: credits },
+  );
+  logger.debug('[recordToolCost] Billed tool cost', { userId, model, usd, credits });
+  return null;
+}
 
 function isHostFileAuthoringArtifact(artifact) {
   return artifact?.[HOST_FILE_AUTHORING_ARTIFACT_KEY] === true;
@@ -658,6 +702,20 @@ function createToolEndCallback({ req, res, artifactPromises, streamId = null }) 
       return;
     }
 
+    if (output.artifact.cost) {
+      artifactPromises.push(
+        recordToolCost({
+          req,
+          cost: output.artifact.cost,
+          toolName: output.name,
+          metadata,
+        }).catch((error) => {
+          logger.error('[recordToolCost] Error billing tool cost:', error);
+          return null;
+        }),
+      );
+    }
+
     if (output.artifact[Tools.file_search]) {
       artifactPromises.push(
         (async () => {
@@ -919,6 +977,20 @@ function createResponsesToolEndCallback({ req, res, tracker, artifactPromises })
 
     if (!output.artifact) {
       return;
+    }
+
+    if (output.artifact.cost) {
+      artifactPromises.push(
+        recordToolCost({
+          req,
+          cost: output.artifact.cost,
+          toolName: output.name,
+          metadata,
+        }).catch((error) => {
+          logger.error('[recordToolCost] Error billing tool cost:', error);
+          return null;
+        }),
+      );
     }
 
     if (output.artifact[Tools.file_search]) {
