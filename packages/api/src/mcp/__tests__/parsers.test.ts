@@ -51,14 +51,15 @@ describe('formatToolContent', () => {
         ],
       });
     });
-
   });
 
   describe('tool cost from _meta', () => {
     it('attaches a reported cost to the artifacts', () => {
       const result: t.MCPToolCallResponse = {
         content: [{ type: 'image', data: 'AAAA', mimeType: 'image/png' }],
-        _meta: { cost: { usd: 0.0387, model: 'google/gemini-2.5-flash-image', provider: 'openrouter' } },
+        _meta: {
+          cost: { usd: 0.0387, model: 'google/gemini-2.5-flash-image', provider: 'openrouter' },
+        },
       };
       const [, artifacts] = formatToolContent(result, 'openai');
       expect(artifacts?.cost).toEqual({

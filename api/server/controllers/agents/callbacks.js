@@ -27,7 +27,6 @@ const {
 const { processFileCitations } = require('~/server/services/Files/Citations');
 const { processCodeOutput, runPreviewFinalize } = require('~/server/services/Files/Code/process');
 const { saveBase64Image } = require('~/server/services/Files/process');
-const { spendTokens } = require('~/models');
 
 /** LibreChat balance credits per USD (1,000,000 credits = $1). */
 const CREDITS_PER_USD = 1_000_000;
@@ -53,6 +52,9 @@ async function recordToolCost({ req, cost, toolName, metadata }) {
   }
   const model = cost.model || toolName;
   const credits = Math.round(usd * CREDITS_PER_USD);
+  // Lazy require: pulling ~/models at module load creates a circular
+  // dependency (models/index.js) that breaks callbacks.js consumers.
+  const { spendTokens } = require('~/models');
   await spendTokens(
     {
       user: userId,
