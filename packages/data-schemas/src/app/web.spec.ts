@@ -55,6 +55,10 @@ describe('loadWebSearchConfig', () => {
         jinaApiKey: '${JINA_API_KEY}',
         jinaApiUrl: '${JINA_API_URL}',
         cohereApiKey: '${COHERE_API_KEY}',
+        /** `custom` reranker (Faktenforum): any OpenAI-compatible /rerank endpoint. */
+        customRerankerApiUrl: '${CUSTOM_RERANKER_API_URL}',
+        customRerankerApiKey: '${CUSTOM_RERANKER_API_KEY}',
+        customRerankerModel: '${CUSTOM_RERANKER_MODEL}',
         safeSearch: SafeSearchTypes.MODERATE,
         rerankerType: undefined,
         tavilyApiKey: '${TAVILY_API_KEY}',

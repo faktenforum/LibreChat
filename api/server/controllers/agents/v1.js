@@ -8,7 +8,10 @@ const {
   agentUpdateSchema,
   refreshListAvatars,
   collectEdgeAgentIds,
+  replaceEdgeSourceId,
+  mergeDeploymentSkillIds,
   mergeAgentOcrConversion,
+  sanitizeModelParameters,
   MAX_AVATAR_REFRESH_AGENTS,
   collectToolResourceFileIds,
   convertOcrToContextInPlace,
@@ -48,6 +51,7 @@ const {
   resolveConfigServers,
   userCanUseMCPServers,
 } = require('~/server/services/MCP');
+const { attachOwnerContacts } = require('~/server/services/Agents/ownerContact');
 const { getMCPServersRegistry } = require('~/config');
 const { getLogStores } = require('~/cache');
 const db = require('~/models');
@@ -56,6 +60,7 @@ const systemTools = {
   [Tools.execute_code]: true,
   [Tools.file_search]: true,
   [Tools.web_search]: true,
+  [Tools.memory]: true,
 };
 
 const MAX_SEARCH_LEN = 100;
@@ -139,18 +144,30 @@ const classifyAgentReferences = async (agentIds, userId, userRole) => {
 };
 
 /**
- * Validates VIEW access for every agent referenced in `edges`.
- * Missing ids are NOT errors here — at create time a self-referential
- * `from` often names the agent being built, which has no DB record
- * yet. Only unauthorized (existing but unviewable) ids are returned.
+ * Validates that every agent referenced in `edges` exists and is viewable.
+ * The create path may allow its newly generated self id because that agent
+ * has not been inserted yet; all other missing references are invalid.
+ * @param {GraphEdge[]} edges
+ * @param {string} userId
+ * @param {string} userRole
+ * @param {Set<string>} [allowedMissingIds]
+ * @returns {Promise<{ missing: string[], unauthorized: string[] }>}
  */
-const validateEdgeAgentAccess = async (edges, userId, userRole) => {
-  const { unauthorized } = await classifyAgentReferences(
+const validateEdgeAgentReferences = async (
+  edges,
+  userId,
+  userRole,
+  allowedMissingIds = new Set(),
+) => {
+  const { missing, unauthorized } = await classifyAgentReferences(
     collectEdgeAgentIds(edges),
     userId,
     userRole,
   );
-  return unauthorized;
+  return {
+    missing: missing.filter((id) => !allowedMissingIds.has(id)),
+    unauthorized,
+  };
 };
 
 /**
@@ -286,32 +303,45 @@ const filterAuthorizedTools = async ({
 };
 
 /**
- * Removes file IDs from tool resources unless the referenced file is owned by
- * the agent owner.
+ * Removes file IDs from tool resources unless they are already attached to the
+ * agent or owned by an allowed uploader.
  * @param {object} params
  * @param {object} params.tool_resources
- * @param {string | object} params.ownerId
+ * @param {string | object | Array<string | object>} params.ownerIds
+ * @param {object} [params.existingToolResources]
  * @param {string} params.logPrefix
  * @returns {Promise<number>} Count of removed file references.
  */
-const pruneToolResourceFileIdsForOwner = async ({ tool_resources, ownerId, logPrefix }) => {
+const pruneToolResourceFileIdsForAgent = async ({
+  tool_resources,
+  ownerIds,
+  existingToolResources,
+  logPrefix,
+}) => {
   const referencedFileIds = collectToolResourceFileIds(tool_resources);
   if (referencedFileIds.length === 0) {
     return 0;
   }
-  if (!ownerId) {
-    return stripFileIdsFromToolResources(tool_resources, referencedFileIds).removedCount;
-  }
-  const ownerIdStr = ownerId.toString();
+  const ownerIdSet = new Set(
+    (Array.isArray(ownerIds) ? ownerIds : [ownerIds])
+      .filter(Boolean)
+      .map((ownerId) => ownerId.toString()),
+  );
+  const existingFileIds = new Set(collectToolResourceFileIds(existingToolResources ?? {}));
 
   try {
-    const ownerFiles = await db.getFiles({ file_id: { $in: referencedFileIds } }, null, {
+    const files = await db.getFiles({ file_id: { $in: referencedFileIds } }, null, {
       file_id: 1,
       user: 1,
     });
     const allowedIds = new Set(
-      (ownerFiles ?? [])
-        .filter((file) => file.user && file.user.toString() === ownerIdStr)
+      (files ?? [])
+        .filter((file) => {
+          if (!file.user) {
+            return false;
+          }
+          return existingFileIds.has(file.file_id) || ownerIdSet.has(file.user.toString());
+        })
         .map((file) => file.file_id),
     );
     const disallowedIds = referencedFileIds.filter((id) => !allowedIds.has(id));
@@ -342,21 +372,37 @@ const createAgentHandler = async (req, res) => {
     const { tools = [], ...agentData } = removeNullishValues(validatedData);
 
     if (agentData.model_parameters && typeof agentData.model_parameters === 'object') {
-      agentData.model_parameters = removeNullishValues(agentData.model_parameters, true);
+      agentData.model_parameters = removeNullishValues(
+        sanitizeModelParameters(agentData.model_parameters),
+        true,
+      );
     }
 
     const { id: userId, role: userRole } = req.user;
+    agentData.id = `agent_${nanoid()}`;
+    agentData.edges = replaceEdgeSourceId(agentData.edges, '', agentData.id);
 
     if (agentData.tool_resources) {
-      await pruneToolResourceFileIdsForOwner({
+      await pruneToolResourceFileIdsForAgent({
         tool_resources: agentData.tool_resources,
-        ownerId: userId,
+        ownerIds: userId,
         logPrefix: '[/Agents]',
       });
     }
 
     if (agentData.edges?.length) {
-      const unauthorized = await validateEdgeAgentAccess(agentData.edges, userId, userRole);
+      const { missing, unauthorized } = await validateEdgeAgentReferences(
+        agentData.edges,
+        userId,
+        userRole,
+        new Set([agentData.id]),
+      );
+      if (missing.length > 0) {
+        return res.status(400).json({
+          error: 'One or more agents referenced in edges do not exist',
+          agent_ids: missing,
+        });
+      }
       if (unauthorized.length > 0) {
         return res.status(403).json({
           error: 'You do not have access to one or more agents referenced in edges',
@@ -403,7 +449,6 @@ const createAgentHandler = async (req, res) => {
       }
     }
 
-    agentData.id = `agent_${nanoid()}`;
     agentData.author = userId;
     agentData.tools = [];
 
@@ -481,15 +526,14 @@ const getAgentHandler = async (req, res, expandProperties = false) => {
     const id = req.params.id;
     const author = req.user.id;
 
-    // Permissions are validated by middleware before calling this function
-    // Simply load the agent by ID
-    const agent = await db.getAgent({ id });
+    // Permissions are validated by middleware before calling this function.
+    // Load the agent with a `version` count but without the heavy `versions`
+    // array; version history is fetched lazily via GET /agents/:id/versions.
+    const agent = await db.getAgentWithVersionCount({ id });
 
     if (!agent) {
       return res.status(404).json({ error: 'Agent not found' });
     }
-
-    agent.version = agent.versions ? agent.versions.length : 0;
 
     if (agent.avatar && agent.avatar?.source === FileSources.s3) {
       try {
@@ -512,17 +556,20 @@ const getAgentHandler = async (req, res, expandProperties = false) => {
     });
     agent.isPublic = isPublic;
 
+    await attachOwnerContacts([agent]);
+
     if (agent.author !== author) {
       delete agent.author;
     }
 
     if (!expandProperties) {
       // VIEW permission: Basic agent info only
-      return res.status(200).json({
+      const responseAgent = {
         _id: agent._id,
         id: agent.id,
         name: agent.name,
         description: agent.description,
+        conversation_starters: agent.conversation_starters,
         avatar: agent.avatar,
         author: agent.author,
         provider: agent.provider,
@@ -533,13 +580,48 @@ const getAgentHandler = async (req, res, expandProperties = false) => {
         // Safe metadata
         createdAt: agent.createdAt,
         updatedAt: agent.updatedAt,
-      });
+      };
+
+      if (agent.support_contact !== undefined) {
+        responseAgent.support_contact = agent.support_contact;
+      }
+      if (agent.owner_contact !== undefined) {
+        responseAgent.owner_contact = agent.owner_contact;
+      }
+
+      return res.status(200).json(responseAgent);
     }
 
     // EDIT permission: Full agent details including sensitive configuration
     return res.status(200).json(agent);
   } catch (error) {
     logger.error('[/Agents/:id] Error retrieving agent', error);
+    res.status(500).json({ error: error.message });
+  }
+};
+
+/**
+ * Retrieves an agent's version history.
+ * Loaded lazily so the editor doesn't transfer large histories up front.
+ * @route GET /agents/:id/versions
+ * @param {object} req - Express Request
+ * @param {object} req.params - Request params
+ * @param {string} req.params.id - Agent identifier.
+ * @returns {Promise<Agent[]>} 200 - The agent's version history - application/json
+ * @returns {Error} 404 - Agent not found
+ */
+const getAgentVersionsHandler = async (req, res) => {
+  try {
+    const id = req.params.id;
+    const versions = await db.getAgentVersions({ id });
+
+    if (versions == null) {
+      return res.status(404).json({ error: 'Agent not found' });
+    }
+
+    return res.status(200).json(versions);
+  } catch (error) {
+    logger.error('[/Agents/:id/versions] Error retrieving agent versions', error);
     res.status(500).json({ error: error.message });
   }
 };
@@ -562,16 +644,33 @@ const updateAgentHandler = async (req, res) => {
     const updateData = removeNullishValues(rest);
 
     if (updateData.model_parameters && typeof updateData.model_parameters === 'object') {
-      updateData.model_parameters = removeNullishValues(updateData.model_parameters, true);
+      updateData.model_parameters = removeNullishValues(
+        sanitizeModelParameters(updateData.model_parameters),
+        true,
+      );
     }
 
     if (avatarField === null) {
       updateData.avatar = avatarField;
     }
 
+    if (updateData.edges !== undefined) {
+      updateData.edges = replaceEdgeSourceId(updateData.edges, '', id);
+    }
+
     if (updateData.edges?.length) {
       const { id: userId, role: userRole } = req.user;
-      const unauthorized = await validateEdgeAgentAccess(updateData.edges, userId, userRole);
+      const { missing, unauthorized } = await validateEdgeAgentReferences(
+        updateData.edges,
+        userId,
+        userRole,
+      );
+      if (missing.length > 0) {
+        return res.status(400).json({
+          error: 'One or more agents referenced in edges do not exist',
+          agent_ids: missing,
+        });
+      }
       if (unauthorized.length > 0) {
         return res.status(403).json({
           error: 'You do not have access to one or more agents referenced in edges',
@@ -631,9 +730,10 @@ const updateAgentHandler = async (req, res) => {
     }
 
     if (updateData.tool_resources) {
-      await pruneToolResourceFileIdsForOwner({
+      await pruneToolResourceFileIdsForAgent({
         tool_resources: updateData.tool_resources,
-        ownerId: existingAgent.author,
+        ownerIds: req.user.id,
+        existingToolResources: existingAgent.tool_resources,
         logPrefix: `[/Agents/:id] Agent ${id}`,
       });
     }
@@ -705,6 +805,8 @@ const updateAgentHandler = async (req, res) => {
       updatedAgent.author = updatedAgent.author.toString();
     }
 
+    await attachOwnerContacts([updatedAgent]);
+
     if (updatedAgent.author !== req.user.id) {
       delete updatedAgent.author;
     }
@@ -739,7 +841,7 @@ const updateAgentHandler = async (req, res) => {
  */
 const duplicateAgentHandler = async (req, res) => {
   const { id } = req.params;
-  const { id: userId } = req.user;
+  const { id: userId, role: userRole } = req.user;
   const sensitiveFields = ['api_key', 'oauth_client_id', 'oauth_client_secret'];
 
   try {
@@ -789,6 +891,29 @@ const duplicateAgentHandler = async (req, res) => {
       id: newAgentId,
       author: userId,
     });
+    newAgentData.edges = replaceEdgeSourceId(newAgentData.edges, id, newAgentId);
+    newAgentData.edges = replaceEdgeSourceId(newAgentData.edges, '', newAgentId);
+
+    if (newAgentData.edges?.length) {
+      const { missing, unauthorized } = await validateEdgeAgentReferences(
+        newAgentData.edges,
+        userId,
+        userRole,
+        new Set([newAgentId]),
+      );
+      if (missing.length > 0) {
+        return res.status(400).json({
+          error: 'One or more agents referenced in edges do not exist',
+          agent_ids: missing,
+        });
+      }
+      if (unauthorized.length > 0) {
+        return res.status(403).json({
+          error: 'You do not have access to one or more agents referenced in edges',
+          agent_ids: unauthorized,
+        });
+      }
+    }
 
     const newActionsList = [];
     const originalActions = (await db.getActions({ agent_id: id }, true)) ?? [];
@@ -853,9 +978,9 @@ const duplicateAgentHandler = async (req, res) => {
     }
 
     if (newAgentData.tool_resources) {
-      await pruneToolResourceFileIdsForOwner({
+      await pruneToolResourceFileIdsForAgent({
         tool_resources: newAgentData.tool_resources,
-        ownerId: userId,
+        ownerIds: userId,
         logPrefix: '[/Agents/:id/duplicate]',
       });
     }
@@ -1036,13 +1161,16 @@ const getListAgentsHandler = async (req, res) => {
         resourceType: ResourceType.SKILL,
         requiredPermissions: PermissionBits.VIEW,
       });
-      accessibleSkillSet = new Set(accessibleSkillIds.map((oid) => oid.toString()));
+      accessibleSkillSet = new Set(
+        mergeDeploymentSkillIds(accessibleSkillIds).map((oid) => oid.toString()),
+      );
     }
 
     const publicSet = new Set(publiclyAccessibleIds.map((oid) => oid.toString()));
+    const agentsWithContacts = await attachOwnerContacts(agents);
 
     const urlCache = cachedRefresh?.urlCache;
-    data.data = agents.map((agent) => {
+    data.data = agentsWithContacts.map((agent) => {
       if (accessibleSkillSet) {
         sanitizeViewerSkillScope(agent, accessibleSkillSet);
       }
@@ -1148,6 +1276,7 @@ const uploadAgentAvatarHandler = async (req, res) => {
     const updatedAgent = await db.updateAgent({ id: agent_id }, data, {
       updatingUserId: req.user.id,
     });
+    await attachOwnerContacts([updatedAgent]);
 
     try {
       const avatarCache = getLogStores(CacheKeys.S3_EXPIRY_INTERVAL);
@@ -1207,10 +1336,42 @@ const revertAgentVersionHandler = async (req, res) => {
       return res.status(404).json({ error: 'Agent not found' });
     }
 
+    const revertVersion = existingAgent.versions?.[version_index];
+    const storedRevertEdges = Array.isArray(revertVersion?.edges) ? revertVersion.edges : [];
+    const revertEdges = replaceEdgeSourceId(storedRevertEdges, '', id);
+    const hasLegacyEdgeSource = storedRevertEdges.some((edge) =>
+      Array.isArray(edge.from) ? edge.from.includes('') : edge.from === '',
+    );
+    if (revertEdges.length > 0) {
+      const { missing, unauthorized } = await validateEdgeAgentReferences(
+        revertEdges,
+        req.user.id,
+        req.user.role,
+      );
+      if (missing.length > 0) {
+        return res.status(400).json({
+          error: 'One or more agents referenced in edges do not exist',
+          agent_ids: missing,
+        });
+      }
+      if (unauthorized.length > 0) {
+        return res.status(403).json({
+          error: 'You do not have access to one or more agents referenced in edges',
+          agent_ids: unauthorized,
+        });
+      }
+    }
+
     // Permissions are enforced via route middleware (ACL EDIT)
 
     let updatedAgent = await db.revertAgentVersion({ id }, version_index);
     const revertUpdates = {};
+    if (
+      revertVersion &&
+      (hasLegacyEdgeSource || (!Array.isArray(revertVersion.edges) && updatedAgent.edges?.length))
+    ) {
+      revertUpdates.edges = revertEdges;
+    }
 
     if (updatedAgent.tools?.length) {
       const [availableTools, configServers] = await Promise.all([
@@ -1234,9 +1395,10 @@ const revertAgentVersionHandler = async (req, res) => {
     }
 
     if (updatedAgent.tool_resources) {
-      const removedCount = await pruneToolResourceFileIdsForOwner({
+      const removedCount = await pruneToolResourceFileIdsForAgent({
         tool_resources: updatedAgent.tool_resources,
-        ownerId: existingAgent.author,
+        ownerIds: req.user.id,
+        existingToolResources: updatedAgent.tool_resources,
         logPrefix: '[/Agents/:id/revert]',
       });
       if (removedCount > 0) {
@@ -1251,6 +1413,8 @@ const revertAgentVersionHandler = async (req, res) => {
     if (updatedAgent.author) {
       updatedAgent.author = updatedAgent.author.toString();
     }
+
+    await attachOwnerContacts([updatedAgent]);
 
     if (updatedAgent.author !== req.user.id) {
       delete updatedAgent.author;
@@ -1307,6 +1471,7 @@ const getAgentCategories = async (_req, res) => {
 module.exports = {
   createAgent: createAgentHandler,
   getAgent: getAgentHandler,
+  getAgentVersions: getAgentVersionsHandler,
   updateAgent: updateAgentHandler,
   duplicateAgent: duplicateAgentHandler,
   deleteAgent: deleteAgentHandler,
