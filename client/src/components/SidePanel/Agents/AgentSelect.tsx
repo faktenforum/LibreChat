@@ -1,20 +1,35 @@
+import { memo, useCallback, useEffect, useRef } from 'react';
 import { EarthIcon } from 'lucide-react';
 import { ControlCombobox } from '@librechat/client';
-import { memo, useCallback, useEffect, useRef } from 'react';
 import { useFormContext, Controller } from 'react-hook-form';
 import {
   AgentCapabilities,
   defaultAgentFormValues,
   validateVisionModel,
 } from 'librechat-data-provider';
+import type { Agent, AgentCreateParams, TSpecsConfig } from 'librechat-data-provider';
 import type { UseMutationResult, QueryObserverResult } from '@tanstack/react-query';
-import type { Agent, AgentCreateParams } from 'librechat-data-provider';
 import type { TAgentCapabilities, AgentForm } from '~/common';
 import { cn, createProviderOption, processAgentOption, getDefaultAgentFormValues } from '~/utils';
-import { useLocalize, useAgentDefaultPermissionLevel } from '~/hooks';
 import { useListAgentsQuery, useGetStartupConfig } from '~/data-provider';
+import { useLocalize, useAgentDefaultPermissionLevel } from '~/hooks';
 
 const keys = new Set(Object.keys(defaultAgentFormValues));
+
+/**
+ * The agent's vision override, or the model's own capability when the agent has none.
+ * Kept out of the option-mapping callback so the two branches stay readable.
+ */
+function resolveAgentVision(agent: Agent, modelSpecs?: TSpecsConfig): boolean {
+  if (agent.vision !== undefined) {
+    return agent.vision;
+  }
+  const model = (agent.model_parameters as { model?: string } | undefined)?.model ?? agent.model;
+  if (model == null || model === '') {
+    return false;
+  }
+  return validateVisionModel({ model, modelSpecs });
+}
 
 function AgentSelect({
   agentQuery,
@@ -59,27 +74,18 @@ function AgentSelect({
         icon: isGlobal ? <EarthIcon className={'icon-lg text-green-400'} /> : null,
       };
 
-      // Use the agent's explicit vision flag; if unset, auto-detect from the model
-      const explicitVision = fullAgent.vision;
-      const agentModel =
-        (fullAgent.model_parameters as { model?: string })?.model ?? fullAgent.model;
-      const agentVision =
-        explicitVision !== undefined
-          ? explicitVision
-          : agentModel
-            ? validateVisionModel({
-                model: agentModel,
-                modelSpecs: startupConfig?.modelSpecs,
-              })
-            : false;
+      // The agent's explicit vision flag wins; unset means derive it from the model.
+      const agentVision = resolveAgentVision(fullAgent, startupConfig?.modelSpecs);
 
       const capabilities: TAgentCapabilities = {
         [AgentCapabilities.web_search]: false,
         [AgentCapabilities.file_search]: false,
         [AgentCapabilities.execute_code]: false,
         [AgentCapabilities.vision]: agentVision,
+        [AgentCapabilities.memory]: false,
         [AgentCapabilities.end_after_tools]: false,
         [AgentCapabilities.hide_sequential_outputs]: false,
+        [AgentCapabilities.stateful_code_sessions]: false,
       };
 
       const agentTools: string[] = [];
@@ -169,9 +175,23 @@ function AgentSelect({
         }
       });
 
+      /** Legacy state from the removed Advanced kill switch: a non-empty
+       * allowlist with the master flag off (or unset, for agents predating
+       * the flag). The builder has no control left for it and the runtime
+       * treats it as "no skills", yet the section would render the selection
+       * as active. Normalize to enabled so the form matches what the UI
+       * shows and a later save persists the displayed behavior. */
+      if (
+        Array.isArray(formValues.skills) &&
+        formValues.skills.length > 0 &&
+        formValues.skills_enabled !== true
+      ) {
+        formValues.skills_enabled = true;
+      }
+
       reset(formValues);
     },
-    [reset],
+    [reset, startupConfig?.modelSpecs],
   );
 
   const onSelect = useCallback(

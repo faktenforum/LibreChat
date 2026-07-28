@@ -565,6 +565,7 @@ export enum AgentCapabilities {
   end_after_tools = 'end_after_tools',
   deferred_tools = 'deferred_tools',
   execute_code = 'execute_code',
+  stateful_code_sessions = 'stateful_code_sessions',
   file_search = 'file_search',
   web_search = 'web_search',
   artifacts = 'artifacts',
@@ -572,10 +573,13 @@ export enum AgentCapabilities {
   actions = 'actions',
   context = 'context',
   skills = 'skills',
+  memory = 'memory',
+  ask_user_question = 'ask_user_question',
   tools = 'tools',
   chain = 'chain',
   ocr = 'ocr',
   vision = 'vision',
+  run_in_background = 'run_in_background',
 }
 
 export const defaultAssistantsVersion = {
@@ -688,6 +692,8 @@ export const defaultAgentCapabilities = [
   AgentCapabilities.actions,
   AgentCapabilities.context,
   AgentCapabilities.skills,
+  AgentCapabilities.memory,
+  AgentCapabilities.ask_user_question,
   AgentCapabilities.tools,
   AgentCapabilities.chain,
   AgentCapabilities.ocr,
@@ -756,6 +762,124 @@ const remoteApiSchema = z.object({
   auth: remoteApiAuthSchema.optional(),
 });
 
+/**
+ * Permission mode applied to a tool call. Mirrors `@librechat/agents`'s
+ * `ToolPolicyMode` 1:1.
+ *
+ * - `default`: ask the user about anything not explicitly allowed (default-on).
+ * - `dontAsk`: deny anything not explicitly allowed (headless / API-key flows).
+ * - `bypass`: auto-approve everything that isn't explicitly denied
+ *   (the user-facing "stop asking me" toggle).
+ *
+ * Subagents inherit the parent's mode; this is enforced by the SDK and not
+ * overridable per-subagent.
+ */
+export const toolApprovalModeSchema = z.enum(['default', 'dontAsk', 'bypass']);
+export type ToolApprovalMode = z.infer<typeof toolApprovalModeSchema>;
+
+/**
+ * Per-endpoint tool-approval policy.
+ *
+ * Shape mirrors `@librechat/agents`'s `ToolPolicyConfig` so the host can map it
+ * directly into `createToolPolicyHook(config)`. The SDK does the evaluation
+ * (`deny → bypass → allow → ask → dontAsk → fallthrough(ask)`); this config
+ * just describes the surface.
+ *
+ * Conventions:
+ * - All list entries are matched as globs (`*`). Use `mcp:server:*` to scope
+ *   a rule to every tool from a single MCP server.
+ * - `deny` always wins, including under `bypass`.
+ * - `enabled: false` is a LibreChat-only kill switch that disables the entire
+ *   HITL machinery for this endpoint (no checkpointer, no hooks, no prompts).
+ *   This is admin-level; users toggle prompting via `mode: 'bypass'` instead.
+ */
+/**
+ * A programmatic tool-approval hook loaded from a module at startup.
+ *
+ * The referenced module's default export must be a builder
+ * `(options?) => ToolApprovalHookFactory` (see `@librechat/api`'s `registerToolApprovalHook`).
+ * Hooks compose with the static `allow`/`deny`/`ask` policy above and can only TIGHTEN it
+ * (the SDK folds decisions `deny → ask → allow`). This is admin-level config — the module is
+ * dynamically imported and executed in-process, so only reference trusted code.
+ */
+export const toolApprovalHookConfigSchema = z.object({
+  /**
+   * Module specifier to import: a bare package name (e.g. `@acme/approval-hooks`) or a path —
+   * absolute, or relative to the app root. Its default export is the hook builder.
+   */
+  module: z.string().min(1),
+  /** Optional regex matched against the tool name; omit to run for every tool. */
+  matcher: z.string().optional(),
+  /** Static options forwarded to the module's builder; the hook's own per-call config. */
+  options: z.record(z.unknown()).optional(),
+});
+
+export type TToolApprovalHookConfig = z.infer<typeof toolApprovalHookConfigSchema>;
+
+export const toolApprovalPolicySchema = z
+  .object({
+    enabled: z.boolean().optional(),
+    mode: toolApprovalModeSchema.optional(),
+    allow: z.array(z.string()).optional(),
+    deny: z.array(z.string()).optional(),
+    ask: z.array(z.string()).optional(),
+    /** Optional reason template surfaced in the prompt; `{tool}` is interpolated. */
+    reason: z.string().optional(),
+    /**
+     * Programmatic policy hooks loaded from modules at startup. They layer on top of the
+     * static lists above for dynamic, context-aware decisions the lists can't express
+     * (per-args, per-agent, per-user). See {@link toolApprovalHookConfigSchema}.
+     *
+     * BASE-CONFIG ONLY: hooks are imported + registered once, process-wide, at server
+     * startup — they are NOT reloaded from per-role/user/tenant admin overrides. Encode
+     * per-user/tenant behavior INSIDE the hook (via its runtime context), not by varying the
+     * module list per override. Honored only when `enabled` is true.
+     */
+    hooks: z.array(toolApprovalHookConfigSchema).optional(),
+  })
+  .optional();
+
+export type TToolApprovalPolicy = z.infer<typeof toolApprovalPolicySchema>;
+
+/**
+ * Durable checkpointer backing human-in-the-loop resume.
+ *
+ * When `toolApproval.enabled` is true, a run that pauses for review suspends its
+ * LangGraph state to a checkpoint; resuming rebuilds that state on a *fresh* `Run`
+ * — possibly on a different replica, or the same worker after a restart. That only
+ * works if the checkpoint outlives the original request, so HITL needs a durable
+ * saver, not the SDK's process-local `MemorySaver` fallback.
+ *
+ * Defaults are zero-config: with `toolApproval.enabled` on and no `checkpointer`
+ * block, LibreChat persists checkpoints to its primary MongoDB, so resume works
+ * across replicas out of the box.
+ *
+ * - `type: 'mongo'` (default) — persist to the app database; survives restarts and
+ *   resolves on any replica. A TTL index reclaims runs that are never resolved.
+ * - `type: 'memory'` — process-local only. Paused runs do NOT survive a restart and
+ *   can only be resolved on the originating worker. Single-process / dev only.
+ */
+export const checkpointerTypeSchema = z.enum(['mongo', 'memory']);
+export type TCheckpointerType = z.infer<typeof checkpointerTypeSchema>;
+
+export const checkpointerSchema = z
+  .object({
+    type: checkpointerTypeSchema.optional(),
+    /**
+     * Approval window, in seconds: how long a paused run waits for a decision
+     * before it is reclaimed. Drives both the Mongo TTL index on checkpoints and
+     * the pending-action expiry, keeping the two layers in lockstep. Defaults to
+     * 86400 (24h). Raise it for longer review windows.
+     */
+    ttl: z.number().int().positive().optional(),
+    /** Advanced: override the Mongo collection names used for checkpoints. */
+    checkpointCollectionName: z.string().optional(),
+    checkpointWritesCollectionName: z.string().optional(),
+  })
+  .optional();
+
+export type TCheckpointerConfig = z.infer<typeof checkpointerSchema>;
+
 export const agentsEndpointSchema = baseEndpointSchema
   .omit({ baseURL: true })
   .merge(
@@ -778,6 +902,11 @@ export const agentsEndpointSchema = baseEndpointSchema
         })
         .optional(),
       remoteApi: remoteApiSchema.optional(),
+      /** Human-in-the-loop tool approval policy. Off by default. */
+      toolApproval: toolApprovalPolicySchema,
+      /** Durable checkpointer backing HITL resume. Defaults to the app's MongoDB
+       *  when `toolApproval.enabled` is set; ignored otherwise. */
+      checkpointer: checkpointerSchema,
     }),
   )
   .default({
@@ -859,6 +988,10 @@ export const endpointSchema = baseEndpointSchema.merge(
         defaultParamsEndpoint: z.string().default('custom'),
         reasoningFormat: eReasoningParameterFormatSchema.optional(),
         reasoningKey: eReasoningResponseKeySchema.optional(),
+        /** Replays `reasoning_content` within a run's tool-call turns (e.g. Xiaomi MiMo, Kimi). */
+        includeReasoningContent: z.boolean().optional(),
+        /** Also reconstructs `reasoning_content` from persisted history across turns (implies `includeReasoningContent`). */
+        includeReasoningHistory: z.boolean().optional(),
         paramDefinitions: z.array(paramDefinitionSchema).optional(),
       })
       .strict()
@@ -1220,6 +1353,8 @@ export const interfaceSchema = z
       .optional(),
     fileSearch: z.boolean().optional(),
     fileCitations: z.boolean().optional(),
+    /** Tool keys (and `'mcp'` or an MCP server name) pinned to the prompt bar by default */
+    defaultPinnedTools: z.array(z.string()).optional(),
     buildInfo: z.boolean().optional(),
     remoteAgents: z
       .object({
@@ -1248,6 +1383,7 @@ export const interfaceSchema = z
           create: z.boolean().optional(),
           share: z.boolean().optional(),
           public: z.boolean().optional(),
+          snapshotFiles: z.boolean().optional(),
         }),
       ])
       .optional(),
@@ -1311,6 +1447,7 @@ export const interfaceSchema = z
       create: true,
       share: true,
       public: true,
+      snapshotFiles: true,
     },
   });
 
@@ -1391,6 +1528,8 @@ export type TStartupConfig = {
   modelDescriptions?: Record<string, Record<string, string>>;
   sharedLinksEnabled: boolean;
   publicSharedLinksEnabled: boolean;
+  /** Whether shared links snapshot conversation files (gates the per-link "share files" checkbox). */
+  sharedLinksSnapshotFilesEnabled?: boolean;
   /** Effective default timing for when conversation titles become fetchable.
    * `immediate` = fetch in parallel with the active stream (default);
    * `final` = fetch only after the stream completes (legacy). */
@@ -1441,7 +1580,21 @@ export type TStartupConfig = {
     branch?: string | null;
     buildDate?: string | null;
   };
+  fileUploadSseEnabled?: boolean;
 };
+
+export type TSharedLinkStartupInterface = Pick<
+  Partial<TInterfaceConfig>,
+  'privacyPolicy' | 'termsOfService'
+>;
+
+export type TSharedLinkStartupConfig = Pick<TStartupConfig, 'appTitle'> &
+  Pick<
+    Partial<TStartupConfig>,
+    'analyticsGtmId' | 'bundlerURL' | 'customFooter' | 'staticBundlerURL'
+  > & {
+    interface?: TSharedLinkStartupInterface;
+  };
 
 export enum OCRStrategy {
   MISTRAL_OCR = 'mistral_ocr',
@@ -1639,6 +1792,11 @@ export const contextPruningSchema = z.object({
   minPrunableToolChars: z.number().min(0).optional(),
 });
 
+export const retainRecentConfigSchema = z.object({
+  turns: z.number().min(0).max(20).optional(),
+  tokens: z.number().positive().optional(),
+});
+
 export const summarizationConfigSchema = z.object({
   enabled: z.boolean().optional(),
   provider: z.string().optional(),
@@ -1650,6 +1808,7 @@ export const summarizationConfigSchema = z.object({
   reserveRatio: z.number().min(0).max(1).optional(),
   maxSummaryTokens: z.number().positive().optional(),
   contextPruning: contextPruningSchema.optional(),
+  retainRecent: retainRecentConfigSchema.optional(),
 });
 
 export type SummarizationConfig = z.infer<typeof summarizationConfigSchema>;
@@ -1688,11 +1847,30 @@ export const messageFilterSchema = z.object({
 
 export type MessageFilterConfig = z.infer<typeof messageFilterSchema>;
 
+export const langfuseConfigSchema = z.object({
+  enabled: z.boolean().optional(),
+  publicKey: z.string().optional(),
+  secretKey: z.string().optional(),
+  /** Non-secret display value of the secret key, stored at write time so
+   * admin reads can show which secret key is configured without returning the secret. */
+  displaySecretKey: z.string().optional(),
+  /** Routing key for one of the deployment-configured tenant Langfuse destinations. */
+  destination: z.string().optional(),
+  fanout: z
+    .object({
+      enabled: z.boolean().optional(),
+    })
+    .optional(),
+});
+
+export type LangfuseConfig = z.infer<typeof langfuseConfigSchema>;
+
 export const configSchema = z.object({
   version: z.string(),
   cache: z.boolean().default(true),
   ocr: ocrSchema.optional(),
   webSearch: webSearchSchema.optional(),
+  langfuse: langfuseConfigSchema.optional(),
   memory: memorySchema.optional(),
   summarization: summarizationConfigSchema.optional(),
   skillSync: skillSyncConfigSchema,
@@ -1845,6 +2023,9 @@ export const alternateName = {
 };
 
 const sharedOpenAIModels = [
+  'gpt-5.6',
+  'gpt-5.6-terra',
+  'gpt-5.6-luna',
   'gpt-5.5',
   'gpt-5.5-pro',
   'chat-latest',
@@ -1870,8 +2051,10 @@ const sharedOpenAIModels = [
 
 const sharedAnthropicModels = [
   'claude-fable-5',
+  'claude-opus-5',
   'claude-opus-4-8',
   'claude-opus-4-7',
+  'claude-sonnet-5',
   'claude-sonnet-4-6',
   'claude-opus-4-6',
   'claude-sonnet-4-5',
@@ -1893,18 +2076,25 @@ const sharedAnthropicModels = [
   'claude-3-5-sonnet-latest',
 ];
 
+/**
+ * Claude 4+ models are not invocable on-demand by their bare foundation-model
+ * ID on the Converse path — Bedrock rejects those with "Invocation of model ID
+ * ... with on-demand throughput isn't supported. Retry your request with the ID
+ * or ARN of an inference profile that contains this model." Default to the
+ * `global.` cross-region profile (no regional pricing premium, widest
+ * availability); Opus 4.1 has no global profile, so it uses `us.`.
+ */
 export const bedrockModels = [
-  'anthropic.claude-fable-5',
-  'anthropic.claude-opus-4-8',
-  'anthropic.claude-opus-4-7',
-  'anthropic.claude-sonnet-4-6',
-  'anthropic.claude-opus-4-6-v1',
-  'anthropic.claude-sonnet-4-5-20250929-v1:0',
-  'anthropic.claude-haiku-4-5-20251001-v1:0',
-  'anthropic.claude-opus-4-1-20250805-v1:0',
-  'anthropic.claude-3-5-sonnet-20241022-v2:0',
-  'anthropic.claude-3-5-sonnet-20240620-v1:0',
-  'anthropic.claude-3-5-haiku-20241022-v1:0',
+  'global.anthropic.claude-fable-5',
+  'global.anthropic.claude-opus-5',
+  'global.anthropic.claude-opus-4-8',
+  'global.anthropic.claude-opus-4-7',
+  'global.anthropic.claude-sonnet-5',
+  'global.anthropic.claude-sonnet-4-6',
+  'global.anthropic.claude-opus-4-6-v1',
+  'global.anthropic.claude-sonnet-4-5-20250929-v1:0',
+  'global.anthropic.claude-haiku-4-5-20251001-v1:0',
+  'us.anthropic.claude-opus-4-1-20250805-v1:0',
   // 'cohere.command-text-v14', // no conversation history
   // 'cohere.command-light-text-v14', // no conversation history
   'cohere.command-r-v1:0',
@@ -1934,8 +2124,11 @@ export const defaultModels = {
   [EModelEndpoint.assistants]: [...sharedOpenAIModels, 'chatgpt-4o-latest'],
   [EModelEndpoint.agents]: sharedOpenAIModels, // TODO: Add agent models (agentsModels)
   [EModelEndpoint.google]: [
+    // Gemini 3.6 Models
+    'gemini-3.6-flash',
     // Gemini 3.5 Models
     'gemini-3.5-flash',
+    'gemini-3.5-flash-lite',
     // Gemini 3.1 Models
     'gemini-3.1-pro-preview',
     'gemini-3.1-pro-preview-customtools',
@@ -2047,27 +2240,24 @@ export enum VisionModes {
 
 /**
  * Validates whether a model supports vision capabilities.
- * 
+ *
  * Checks in order:
  * 1. Exclude known non-vision models
  * 2. modelSpecs configuration (highest priority if provided)
  * 3. Hardcoded visionModels list
- * 
+ *
  * @param model - Model identifier to check
  * @param modelSpecs - Optional modelSpecs configuration from librechat.yaml
- * @param availableModels - Not used (kept for backwards compatibility)
  * @param additionalModels - Optional additional models to include in vision check
  * @returns true if the model supports vision, false otherwise
  */
 export function validateVisionModel({
   model,
   additionalModels = [],
-  availableModels,
   modelSpecs,
 }: {
   model: string;
   additionalModels?: string[];
-  availableModels?: string[];
   modelSpecs?: TSpecsConfig;
 }): boolean {
   if (!model) {
@@ -2079,27 +2269,25 @@ export function validateVisionModel({
   }
 
   if (modelSpecs?.list) {
-    const matchingSpec = modelSpecs.list.find(
-      (spec) => {
-        // Exact match with preset.model
-        if (spec.preset?.model && spec.preset.model === model) {
-          return true;
-        }
-        // Partial match: model contains preset.model (only if preset.model is not empty)
-        if (spec.preset?.model && spec.preset.model.length > 0 && model.includes(spec.preset.model)) {
-          return true;
-        }
-        // Exact match with spec.name
-        if (spec.name && spec.name === model) {
-          return true;
-        }
-        // Partial match: model contains spec.name (only if spec.name is not empty)
-        if (spec.name && spec.name.length > 0 && model.includes(spec.name)) {
-          return true;
-        }
-        return false;
-      },
-    );
+    const matchingSpec = modelSpecs.list.find((spec) => {
+      // Exact match with preset.model
+      if (spec.preset?.model && spec.preset.model === model) {
+        return true;
+      }
+      // Partial match: model contains preset.model (only if preset.model is not empty)
+      if (spec.preset?.model && spec.preset.model.length > 0 && model.includes(spec.preset.model)) {
+        return true;
+      }
+      // Exact match with spec.name
+      if (spec.name && spec.name === model) {
+        return true;
+      }
+      // Partial match: model contains spec.name (only if spec.name is not empty)
+      if (spec.name && spec.name.length > 0 && model.includes(spec.name)) {
+        return true;
+      }
+      return false;
+    });
 
     if (matchingSpec?.vision !== undefined) {
       return matchingSpec.vision === true;
@@ -2164,6 +2352,14 @@ export enum CacheKeys {
    * Key for the roles cache.
    */
   ROLES = 'ROLES',
+  /**
+   * Key for cached group memberships used to resolve ACL user principals.
+   */
+  USER_PRINCIPALS = 'USER_PRINCIPALS',
+  /**
+   * Key for per-conversation stateful code sandbox prewarm/warm state.
+   */
+  SANDBOX_PREWARM = 'SANDBOX_PREWARM',
   /**
    * Key for the title generation cache.
    */
@@ -2234,6 +2430,10 @@ export enum CacheKeys {
    */
   OPENID_EXCHANGED_TOKENS = 'OPENID_EXCHANGED_TOKENS',
   /**
+   * Key for cached authenticated user documents.
+   */
+  AUTH_USER_DOC = 'AUTH_USER_DOC',
+  /**
    * Key for OpenID session.
    */
   OPENID_SESSION = 'OPENID_SESSION',
@@ -2246,6 +2446,8 @@ export enum CacheKeys {
    */
   ADMIN_OAUTH_EXCHANGE = 'ADMIN_OAUTH_EXCHANGE',
 }
+
+export const AUTH_USER_DOC_BY_ID_PREFIX = 'auth-user-doc-byid';
 
 /**
  * Enum for violation types, used to identify, log, and cache violations.
@@ -2369,6 +2571,10 @@ export enum ErrorTypes {
    * Google provider does not allow custom tools with built-in tools
    */
   GOOGLE_TOOL_CONFLICT = 'google_tool_conflict',
+  /**
+   * Google provider could not process a linked video (most often longer than the model accepts)
+   */
+  GOOGLE_VIDEO_UNPROCESSABLE = 'google_video_unprocessable',
   /**
    * Invalid Agent Provider (excluded by Admin)
    */
@@ -2587,6 +2793,8 @@ export enum Constants {
   BASH_PROGRAMMATIC_TOOL_CALLING = 'run_tools_with_bash',
   /** Subagent spawn tool name (must match `@librechat/agents` `Constants.SUBAGENT`). */
   SUBAGENT = 'subagent',
+  /** Poll tool for retrieving the status/result of a backgrounded tool call. */
+  CHECK_BACKGROUND_TASK = 'check_background_task',
 }
 
 /** Maximum explicit subagent hops allowed from any root agent at runtime. */
@@ -2643,6 +2851,8 @@ export enum LocalStorageKeys {
   LAST_ARTIFACTS_TOGGLE_ = 'LAST_ARTIFACTS_TOGGLE_',
   /** Last checked toggle for Skills per conversation ID */
   LAST_SKILLS_TOGGLE_ = 'LAST_SKILLS_TOGGLE_',
+  /** Last checked toggle for Memory per conversation ID */
+  LAST_MEMORY_TOGGLE_ = 'LAST_MEMORY_TOGGLE_',
   /** Key for the last selected agent provider */
   LAST_AGENT_PROVIDER = 'lastAgentProvider',
   /** Key for the last selected agent model */

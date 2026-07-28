@@ -52,6 +52,7 @@ jest.mock('~/config', () => ({
 
 const { Calculator } = require('@librechat/agents');
 const { Constants } = require('librechat-data-provider');
+const { ASK_USER_QUESTION_TOOL_NAME } = require('@librechat/api');
 
 const { User } = require('~/db/models');
 const PluginService = require('~/server/services/PluginService');
@@ -304,10 +305,21 @@ describe('Tool Handlers', () => {
       delete process.env.SD_WEBUI_URL;
     });
 
+    it('loads the ask_user_question tool when not returning a map', async () => {
+      const { loadedTools } = await loadTools({
+        user: fakeUser._id,
+        tools: [ASK_USER_QUESTION_TOOL_NAME],
+        useSpecs: true,
+      });
+      expect(loadedTools).toHaveLength(1);
+      expect(loadedTools[0].name).toBe(ASK_USER_QUESTION_TOOL_NAME);
+    });
+
     it('passes request body to chat MCP tool creation and skips stale cache for BODY-scoped servers', async () => {
       const serverName = 'body-scoped';
       const toolKey = `search${Constants.mcp_delimiter}${serverName}`;
       const requestBody = { conversationId: 'conv-123', messageId: 'msg-123' };
+      const jobCreatedAt = 1234;
       const serverConfig = {
         type: 'streamable-http',
         url: 'https://api.example.com/messages/{{LIBRECHAT_BODY_MESSAGEID}}/mcp',
@@ -325,6 +337,7 @@ describe('Tool Handlers', () => {
             user: { id: fakeUser._id.toString(), role: 'USER' },
             body: requestBody,
           },
+          jobCreatedAt,
         },
       });
 
@@ -337,6 +350,7 @@ describe('Tool Handlers', () => {
       expect(mockCreateMCPTool).toHaveBeenCalledWith(
         expect.objectContaining({
           requestBody,
+          jobCreatedAt,
           toolKey,
           config: serverConfig,
         }),

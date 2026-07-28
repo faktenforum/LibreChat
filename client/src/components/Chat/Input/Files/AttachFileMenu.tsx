@@ -19,27 +19,33 @@ import {
   Providers,
   EToolResources,
   EModelEndpoint,
-  isPermissiveMimeConfig,
+  getConfiguredMimeAccept,
+  bedrockDocumentMimeTypes,
   defaultAgentCapabilities,
   bedrockDocumentExtensions,
   isDocumentSupportedProvider,
 } from 'librechat-data-provider';
-import type { EndpointFileConfig, TConversation } from 'librechat-data-provider';
+import type {
+  TConversation,
+  EndpointFileConfig,
+  MimeUploadCapability,
+} from 'librechat-data-provider';
 import type { ExtendedFile, FileSetter } from '~/common';
 import {
-  useAgentToolPermissions,
-  useAgentCapabilities,
-  useGetAgentsConfig,
-  useFileHandlingNoChatContext,
   useLocalize,
+  useVisionModel,
+  useGetAgentsConfig,
+  useAgentCapabilities,
+  useAgentToolPermissions,
+  useFileHandlingNoChatContext,
 } from '~/hooks';
 import { useSharePointFileHandlingNoChatContext } from '~/hooks/Files/useSharePointFileHandling';
+import { useShortcutAriaKey, useShortcutHint } from '~/hooks/useKeyboardShortcuts';
 import { SharePointPickerDialog } from '~/components/SharePoint';
 import { useGetStartupConfig } from '~/data-provider';
 import { ephemeralAgentByConvoId } from '~/store';
 import { MenuItemProps } from '~/common';
 import { cn } from '~/utils';
-import { useVisionModel } from '~/hooks';
 
 type FileUploadType =
   | 'image'
@@ -47,6 +53,45 @@ type FileUploadType =
   | 'image_document'
   | 'image_document_extended'
   | 'image_document_video_audio';
+
+/** What each provider upload path can actually send, used to scope the picker filter to selectable files. */
+const fileTypeCapabilities: Record<FileUploadType, MimeUploadCapability> = {
+  image: { categories: ['image'] },
+  document: { categories: ['document'] },
+  image_document: { categories: ['image', 'document'] },
+  image_document_extended: {
+    categories: ['image', 'document'],
+    documentMimeTypes: bedrockDocumentMimeTypes,
+  },
+  /** Google/Vertex/OpenRouter media path: documents are limited to PDF (see isProviderAttachType). */
+  image_document_video_audio: {
+    categories: ['image', 'document', 'audio', 'video'],
+    documentMimeTypes: ['application/pdf'],
+  },
+};
+
+/**
+ * Picker filter for endpoints that declare no `supportedMimeTypes`. Mirrors
+ * `fileTypeCapabilities` in literal form, minus images when the model cannot read them.
+ */
+function fallbackAccept(fileType: FileUploadType | undefined, visionAvailable: boolean): string {
+  const image = visionAvailable ? 'image/*,.heif,.heic' : '';
+  const join = (...parts: string[]): string => parts.filter(Boolean).join(',');
+  switch (fileType) {
+    case 'image':
+      return image;
+    case 'document':
+      return '.pdf,application/pdf';
+    case 'image_document':
+      return join(image, '.pdf,application/pdf');
+    case 'image_document_extended':
+      return join(image, bedrockDocumentExtensions);
+    case 'image_document_video_audio':
+      return join(image, '.pdf,application/pdf', 'video/*,audio/*');
+    default:
+      return '';
+  }
+}
 
 interface AttachFileMenuProps {
   agentId?: string | null;
@@ -79,6 +124,8 @@ const AttachFileMenu = ({
   const isUploadDisabled = disabled ?? false;
   const inputRef = useRef<HTMLInputElement>(null);
   const [isPopoverActive, setIsPopoverActive] = useState(false);
+  const uploadFileTooltip = useShortcutHint('uploadFile', localize('com_sidepanel_attach_files'));
+  const uploadFileAriaKey = useShortcutAriaKey('uploadFile');
   const [ephemeralAgent, setEphemeralAgent] = useRecoilState(
     ephemeralAgentByConvoId(conversationId),
   );
@@ -112,34 +159,41 @@ const AttachFileMenu = ({
     useAgentToolPermissions(agentId, ephemeralAgent);
   const isVisionAvailable = isVisionModel || visionEnabledByAgent;
 
+  /**
+   * Drops the image category when the model cannot read images. The other paths of a mixed
+   * upload option (PDF, audio, video) still work on a text-only model, so only images are
+   * withheld - the provider hard-errors on those, which would just cost the user a turn.
+   */
+  const scopeToVision = useCallback(
+    (capability: MimeUploadCapability): MimeUploadCapability =>
+      isVisionAvailable
+        ? capability
+        : { ...capability, categories: capability.categories.filter((c) => c !== 'image') },
+    [isVisionAvailable],
+  );
+
   const handleUploadClick = useCallback(
     (fileType?: FileUploadType) => {
       if (!inputRef.current) {
         return;
       }
       inputRef.current.value = '';
-      if (
-        fileType !== undefined &&
-        isPermissiveMimeConfig(endpointFileConfig?.supportedMimeTypes)
-      ) {
-        inputRef.current.accept = '';
-      } else if (fileType === 'image') {
-        inputRef.current.accept = 'image/*,.heif,.heic';
-      } else if (fileType === 'document') {
-        inputRef.current.accept = '.pdf,application/pdf';
-      } else if (fileType === 'image_document') {
-        inputRef.current.accept = 'image/*,.heif,.heic,.pdf,application/pdf';
-      } else if (fileType === 'image_document_extended') {
-        inputRef.current.accept = `image/*,.heif,.heic,${bedrockDocumentExtensions}`;
-      } else if (fileType === 'image_document_video_audio') {
-        inputRef.current.accept = 'image/*,.heif,.heic,.pdf,application/pdf,video/*,audio/*';
+      const configuredAccept =
+        fileType !== undefined
+          ? getConfiguredMimeAccept(
+              endpointFileConfig?.supportedMimeTypes,
+              scopeToVision(fileTypeCapabilities[fileType]),
+            )
+          : undefined;
+      if (configuredAccept != null) {
+        inputRef.current.accept = configuredAccept;
       } else {
-        inputRef.current.accept = '';
+        inputRef.current.accept = fallbackAccept(fileType, isVisionAvailable);
       }
       inputRef.current.click();
       inputRef.current.accept = '';
     },
-    [endpointFileConfig?.supportedMimeTypes],
+    [endpointFileConfig?.supportedMimeTypes, scopeToVision, isVisionAvailable],
   );
 
   const dropdownItems = useMemo(() => {
@@ -167,29 +221,27 @@ const AttachFileMenu = ({
         isDocumentSupportedProvider(currentProvider) ||
         isAzureWithResponsesApi
       ) {
-        if (isVisionAvailable) {
-          items.push({
-            label: localize('com_ui_upload_provider'),
-            onClick: () => {
-              setToolResource(undefined);
-              let fileType: Exclude<FileUploadType, 'image' | 'document'> = 'image_document';
-              if (
-                currentProvider === Providers.GOOGLE ||
-                currentProvider === Providers.OPENROUTER
-              ) {
-                fileType = 'image_document_video_audio';
-              } else if (
-                currentProvider === Providers.BEDROCK ||
-                endpointType === EModelEndpoint.bedrock
-              ) {
-                fileType = 'image_document_extended';
-              }
-              onAction(fileType);
-            },
-            icon: <FileImageIcon className="icon-md" />,
-          });
-        }
+        /* Offered regardless of vision: the picker filter (see scopeToVision) hides images for
+         * a text-only model, but its PDF / audio / video paths stay usable. */
+        items.push({
+          label: localize('com_ui_upload_provider'),
+          onClick: () => {
+            setToolResource(undefined);
+            let fileType: Exclude<FileUploadType, 'image' | 'document'> = 'image_document';
+            if (currentProvider === Providers.GOOGLE || currentProvider === Providers.OPENROUTER) {
+              fileType = 'image_document_video_audio';
+            } else if (
+              currentProvider === Providers.BEDROCK ||
+              endpointType === EModelEndpoint.bedrock
+            ) {
+              fileType = 'image_document_extended';
+            }
+            onAction(fileType);
+          },
+          icon: <FileImageIcon className="icon-md" />,
+        });
       } else {
+        /* Image-only path: nothing left to offer once the model cannot read images. */
         if (isVisionAvailable) {
           items.push({
             label: localize('com_ui_upload_image_input'),
@@ -286,6 +338,7 @@ const AttachFileMenu = ({
           disabled={isUploadDisabled}
           id="attach-file-menu-button"
           aria-label="Attach File Options"
+          aria-keyshortcuts={uploadFileAriaKey}
           className={cn(
             'flex size-9 items-center justify-center rounded-full p-1 hover:bg-surface-hover focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-opacity-50',
             isPopoverActive && 'bg-surface-hover',
@@ -297,7 +350,7 @@ const AttachFileMenu = ({
         </Ariakit.MenuButton>
       }
       id="attach-file-menu-button"
-      description={localize('com_sidepanel_attach_files')}
+      description={uploadFileTooltip}
       disabled={isUploadDisabled}
     />
   );

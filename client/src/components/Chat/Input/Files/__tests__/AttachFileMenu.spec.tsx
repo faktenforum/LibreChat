@@ -1,6 +1,6 @@
 import React from 'react';
-import { render, screen, fireEvent } from '@testing-library/react';
 import { RecoilRoot } from 'recoil';
+import { render, screen, fireEvent } from '@testing-library/react';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { EModelEndpoint, EToolResources, Providers } from 'librechat-data-provider';
 import AttachFileMenu from '../AttachFileMenu';
@@ -11,6 +11,8 @@ jest.mock('~/hooks', () => ({
   useGetAgentsConfig: jest.fn(),
   useFileHandlingNoChatContext: jest.fn(),
   useLocalize: jest.fn(),
+  /** Fork-only: gates whether images may be attached at all. */
+  useVisionModel: jest.fn(),
 }));
 
 jest.mock('~/hooks/Files/useSharePointFileHandling', () => ({
@@ -83,6 +85,7 @@ const mockUseAgentCapabilities = jest.requireMock('~/hooks').useAgentCapabilitie
 const mockUseGetAgentsConfig = jest.requireMock('~/hooks').useGetAgentsConfig;
 const mockUseFileHandlingNoChatContext = jest.requireMock('~/hooks').useFileHandlingNoChatContext;
 const mockUseLocalize = jest.requireMock('~/hooks').useLocalize;
+const mockUseVisionModel = jest.requireMock('~/hooks').useVisionModel;
 const mockUseSharePointFileHandling = jest.requireMock(
   '~/hooks/Files/useSharePointFileHandling',
 ).default;
@@ -93,7 +96,7 @@ const mockUseGetStartupConfig = jest.requireMock('~/data-provider').useGetStartu
 
 const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
 
-function setupMocks(overrides: { provider?: string } = {}) {
+function setupMocks(overrides: { provider?: string; vision?: boolean } = {}) {
   const translations: Record<string, string> = {
     com_files_upload_sharepoint: 'Upload from SharePoint',
     com_sidepanel_attach_files: 'Attach Files',
@@ -120,9 +123,12 @@ function setupMocks(overrides: { provider?: string } = {}) {
   mockUseSharePointFileHandling.mockReturnValue(sharePointReturnValue);
   mockUseSharePointFileHandlingNoChatContext.mockReturnValue(sharePointReturnValue);
   mockUseGetStartupConfig.mockReturnValue({ data: { sharePointFilePickerEnabled: false } });
+  const vision = overrides.vision ?? true;
+  mockUseVisionModel.mockReturnValue(vision);
   mockUseAgentToolPermissions.mockReturnValue({
     fileSearchAllowedByAgent: false,
     codeAllowedByAgent: false,
+    visionEnabledByAgent: vision,
     provider: overrides.provider ?? undefined,
   });
 }
@@ -142,6 +148,22 @@ function renderMenu(props: Record<string, unknown> = {}) {
       </RecoilRoot>
     </QueryClientProvider>,
   );
+}
+
+/**
+ * The accept filter the file input carries at the moment the picker opens. The component clears
+ * `accept` right after `click()`, so it has to be read from inside the click.
+ */
+function captureAcceptOnPick(rendered: ReturnType<typeof renderMenu>): string {
+  openMenu();
+  const input = rendered.container.querySelector('input[type="file"]') as HTMLInputElement;
+  let accept = '';
+  input.click = jest.fn(() => {
+    accept = input.accept;
+  });
+  fireEvent.click(screen.getByText('Upload to Provider'));
+  expect(input.click).toHaveBeenCalled();
+  return accept;
 }
 
 function openMenu() {
@@ -194,6 +216,41 @@ describe('AttachFileMenu', () => {
       renderMenu({ endpointType: 'unknown-type' });
       openMenu();
       expect(screen.getByText('Upload Image')).toBeInTheDocument();
+    });
+
+    /**
+     * Fork-only vision gating. Our non-vision models (Scaleway/OpenRouter) hard-error on image
+     * input, so images must not be offered - but the same menu entry also carries the PDF /
+     * audio / video paths, which a text-only model can still use. Only the picker filter narrows.
+     */
+    describe('vision unavailable', () => {
+      it('keeps "Upload to Provider" so documents stay uploadable', () => {
+        setupMocks({ provider: EModelEndpoint.openAI, vision: false });
+        renderMenu({ endpointType: EModelEndpoint.openAI });
+        openMenu();
+        expect(screen.getByText('Upload to Provider')).toBeInTheDocument();
+      });
+
+      it('drops the image-only entry, which would have nothing left to offer', () => {
+        setupMocks({ vision: false });
+        renderMenu({ endpointType: EModelEndpoint.agents });
+        openMenu();
+        expect(screen.queryByText('Upload Image')).not.toBeInTheDocument();
+      });
+
+      it('excludes images from the file picker while keeping PDFs', () => {
+        setupMocks({ provider: EModelEndpoint.openAI, vision: false });
+        const accept = captureAcceptOnPick(renderMenu({ endpointType: EModelEndpoint.openAI }));
+        expect(accept).not.toContain('image/');
+        expect(accept).toContain('application/pdf');
+      });
+
+      it('includes images in the file picker when vision is available', () => {
+        setupMocks({ provider: EModelEndpoint.openAI, vision: true });
+        const accept = captureAcceptOnPick(renderMenu({ endpointType: EModelEndpoint.openAI }));
+        expect(accept).toContain('image/');
+        expect(accept).toContain('application/pdf');
+      });
     });
 
     it('shows "Upload to Provider" for azureOpenAI with useResponsesApi', () => {
