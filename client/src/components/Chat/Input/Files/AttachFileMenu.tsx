@@ -70,6 +70,29 @@ const fileTypeCapabilities: Record<FileUploadType, MimeUploadCapability> = {
   },
 };
 
+/**
+ * Picker filter for endpoints that declare no `supportedMimeTypes`. Mirrors
+ * `fileTypeCapabilities` in literal form, minus images when the model cannot read them.
+ */
+function fallbackAccept(fileType: FileUploadType | undefined, visionAvailable: boolean): string {
+  const image = visionAvailable ? 'image/*,.heif,.heic' : '';
+  const join = (...parts: string[]): string => parts.filter(Boolean).join(',');
+  switch (fileType) {
+    case 'image':
+      return image;
+    case 'document':
+      return '.pdf,application/pdf';
+    case 'image_document':
+      return join(image, '.pdf,application/pdf');
+    case 'image_document_extended':
+      return join(image, bedrockDocumentExtensions);
+    case 'image_document_video_audio':
+      return join(image, '.pdf,application/pdf', 'video/*,audio/*');
+    default:
+      return '';
+  }
+}
+
 interface AttachFileMenuProps {
   agentId?: string | null;
   endpoint?: string | null;
@@ -136,6 +159,19 @@ const AttachFileMenu = ({
     useAgentToolPermissions(agentId, ephemeralAgent);
   const isVisionAvailable = isVisionModel || visionEnabledByAgent;
 
+  /**
+   * Drops the image category when the model cannot read images. The other paths of a mixed
+   * upload option (PDF, audio, video) still work on a text-only model, so only images are
+   * withheld - the provider hard-errors on those, which would just cost the user a turn.
+   */
+  const scopeToVision = useCallback(
+    (capability: MimeUploadCapability): MimeUploadCapability =>
+      isVisionAvailable
+        ? capability
+        : { ...capability, categories: capability.categories.filter((c) => c !== 'image') },
+    [isVisionAvailable],
+  );
+
   const handleUploadClick = useCallback(
     (fileType?: FileUploadType) => {
       if (!inputRef.current) {
@@ -146,28 +182,18 @@ const AttachFileMenu = ({
         fileType !== undefined
           ? getConfiguredMimeAccept(
               endpointFileConfig?.supportedMimeTypes,
-              fileTypeCapabilities[fileType],
+              scopeToVision(fileTypeCapabilities[fileType]),
             )
           : undefined;
       if (configuredAccept != null) {
         inputRef.current.accept = configuredAccept;
-      } else if (fileType === 'image') {
-        inputRef.current.accept = 'image/*,.heif,.heic';
-      } else if (fileType === 'document') {
-        inputRef.current.accept = '.pdf,application/pdf';
-      } else if (fileType === 'image_document') {
-        inputRef.current.accept = 'image/*,.heif,.heic,.pdf,application/pdf';
-      } else if (fileType === 'image_document_extended') {
-        inputRef.current.accept = `image/*,.heif,.heic,${bedrockDocumentExtensions}`;
-      } else if (fileType === 'image_document_video_audio') {
-        inputRef.current.accept = 'image/*,.heif,.heic,.pdf,application/pdf,video/*,audio/*';
       } else {
-        inputRef.current.accept = '';
+        inputRef.current.accept = fallbackAccept(fileType, isVisionAvailable);
       }
       inputRef.current.click();
       inputRef.current.accept = '';
     },
-    [endpointFileConfig?.supportedMimeTypes],
+    [endpointFileConfig?.supportedMimeTypes, scopeToVision, isVisionAvailable],
   );
 
   const dropdownItems = useMemo(() => {
@@ -195,29 +221,27 @@ const AttachFileMenu = ({
         isDocumentSupportedProvider(currentProvider) ||
         isAzureWithResponsesApi
       ) {
-        if (isVisionAvailable) {
-          items.push({
-            label: localize('com_ui_upload_provider'),
-            onClick: () => {
-              setToolResource(undefined);
-              let fileType: Exclude<FileUploadType, 'image' | 'document'> = 'image_document';
-              if (
-                currentProvider === Providers.GOOGLE ||
-                currentProvider === Providers.OPENROUTER
-              ) {
-                fileType = 'image_document_video_audio';
-              } else if (
-                currentProvider === Providers.BEDROCK ||
-                endpointType === EModelEndpoint.bedrock
-              ) {
-                fileType = 'image_document_extended';
-              }
-              onAction(fileType);
-            },
-            icon: <FileImageIcon className="icon-md" />,
-          });
-        }
+        /* Offered regardless of vision: the picker filter (see scopeToVision) hides images for
+         * a text-only model, but its PDF / audio / video paths stay usable. */
+        items.push({
+          label: localize('com_ui_upload_provider'),
+          onClick: () => {
+            setToolResource(undefined);
+            let fileType: Exclude<FileUploadType, 'image' | 'document'> = 'image_document';
+            if (currentProvider === Providers.GOOGLE || currentProvider === Providers.OPENROUTER) {
+              fileType = 'image_document_video_audio';
+            } else if (
+              currentProvider === Providers.BEDROCK ||
+              endpointType === EModelEndpoint.bedrock
+            ) {
+              fileType = 'image_document_extended';
+            }
+            onAction(fileType);
+          },
+          icon: <FileImageIcon className="icon-md" />,
+        });
       } else {
+        /* Image-only path: nothing left to offer once the model cannot read images. */
         if (isVisionAvailable) {
           items.push({
             label: localize('com_ui_upload_image_input'),
