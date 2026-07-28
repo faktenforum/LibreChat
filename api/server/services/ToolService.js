@@ -497,51 +497,6 @@ async function processRequiredActions(client, requiredActions) {
 
   const tool_outputs = await Promise.all(promises);
 
-  // Process artifacts from MCP tools and prepare for next user message
-  const allArtifacts = [];
-  for (let i = 0; i < requiredActions.length; i++) {
-    const action = requiredActions[i];
-    // MCP tools return [content, artifact] format
-    // For OpenRouter (string format): [string, artifacts]
-    // For OpenAI-compatible (array format): [[contentArray], artifacts]
-    if (
-      action.output &&
-      Array.isArray(action.output) &&
-      action.output.length === 2 &&
-      action.output[1]?.content
-    ) {
-      allArtifacts.push({
-        artifacts: action.output[1],
-        toolName: action.tool,
-      });
-    }
-  }
-
-  if (allArtifacts.length > 0) {
-    const isVisionModel = getVisionCapability(client);
-    const artifactFileIds = [];
-    const artifactContent = [];
-
-    for (const { artifacts, toolName } of allArtifacts) {
-      const processed = await processArtifactsForAssistants({
-        artifacts,
-        isVisionModel,
-        req: client.req,
-        thread_id: requiredActions[0].thread_id,
-        conversationId:
-          (client.responseMessage ?? client.finalMessage)?.conversationId,
-      });
-
-      artifactFileIds.push(...processed.fileIds);
-      artifactContent.push(...processed.contentParts);
-    }
-
-    if (artifactContent.length > 0 || artifactFileIds.length > 0) {
-      client.pendingArtifactContent = artifactContent;
-      client.pendingArtifactFileIds = artifactFileIds;
-    }
-  }
-
   return {
     tool_outputs,
   };

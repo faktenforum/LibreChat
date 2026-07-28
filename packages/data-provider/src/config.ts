@@ -2240,27 +2240,24 @@ export enum VisionModes {
 
 /**
  * Validates whether a model supports vision capabilities.
- * 
+ *
  * Checks in order:
  * 1. Exclude known non-vision models
  * 2. modelSpecs configuration (highest priority if provided)
  * 3. Hardcoded visionModels list
- * 
+ *
  * @param model - Model identifier to check
  * @param modelSpecs - Optional modelSpecs configuration from librechat.yaml
- * @param availableModels - Not used (kept for backwards compatibility)
  * @param additionalModels - Optional additional models to include in vision check
  * @returns true if the model supports vision, false otherwise
  */
 export function validateVisionModel({
   model,
   additionalModels = [],
-  availableModels,
   modelSpecs,
 }: {
   model: string;
   additionalModels?: string[];
-  availableModels?: string[];
   modelSpecs?: TSpecsConfig;
 }): boolean {
   if (!model) {
@@ -2272,27 +2269,25 @@ export function validateVisionModel({
   }
 
   if (modelSpecs?.list) {
-    const matchingSpec = modelSpecs.list.find(
-      (spec) => {
-        // Exact match with preset.model
-        if (spec.preset?.model && spec.preset.model === model) {
-          return true;
-        }
-        // Partial match: model contains preset.model (only if preset.model is not empty)
-        if (spec.preset?.model && spec.preset.model.length > 0 && model.includes(spec.preset.model)) {
-          return true;
-        }
-        // Exact match with spec.name
-        if (spec.name && spec.name === model) {
-          return true;
-        }
-        // Partial match: model contains spec.name (only if spec.name is not empty)
-        if (spec.name && spec.name.length > 0 && model.includes(spec.name)) {
-          return true;
-        }
-        return false;
-      },
-    );
+    const matchingSpec = modelSpecs.list.find((spec) => {
+      // Exact match with preset.model
+      if (spec.preset?.model && spec.preset.model === model) {
+        return true;
+      }
+      // Partial match: model contains preset.model (only if preset.model is not empty)
+      if (spec.preset?.model && spec.preset.model.length > 0 && model.includes(spec.preset.model)) {
+        return true;
+      }
+      // Exact match with spec.name
+      if (spec.name && spec.name === model) {
+        return true;
+      }
+      // Partial match: model contains spec.name (only if spec.name is not empty)
+      if (spec.name && spec.name.length > 0 && model.includes(spec.name)) {
+        return true;
+      }
+      return false;
+    });
 
     if (matchingSpec?.vision !== undefined) {
       return matchingSpec.vision === true;

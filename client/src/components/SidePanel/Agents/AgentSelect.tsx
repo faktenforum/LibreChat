@@ -8,13 +8,28 @@ import {
   validateVisionModel,
 } from 'librechat-data-provider';
 import type { UseMutationResult, QueryObserverResult } from '@tanstack/react-query';
-import type { Agent, AgentCreateParams } from 'librechat-data-provider';
+import type { Agent, AgentCreateParams, TSpecsConfig } from 'librechat-data-provider';
 import type { TAgentCapabilities, AgentForm } from '~/common';
 import { cn, createProviderOption, processAgentOption, getDefaultAgentFormValues } from '~/utils';
 import { useLocalize, useAgentDefaultPermissionLevel } from '~/hooks';
 import { useListAgentsQuery, useGetStartupConfig } from '~/data-provider';
 
 const keys = new Set(Object.keys(defaultAgentFormValues));
+
+/**
+ * The agent's vision override, or the model's own capability when the agent has none.
+ * Kept out of the option-mapping callback so the two branches stay readable.
+ */
+function resolveAgentVision(agent: Agent, modelSpecs?: TSpecsConfig): boolean {
+  if (agent.vision !== undefined) {
+    return agent.vision;
+  }
+  const model = (agent.model_parameters as { model?: string } | undefined)?.model ?? agent.model;
+  if (model == null || model === '') {
+    return false;
+  }
+  return validateVisionModel({ model, modelSpecs });
+}
 
 function AgentSelect({
   agentQuery,
@@ -59,19 +74,8 @@ function AgentSelect({
         icon: isGlobal ? <EarthIcon className={'icon-lg text-green-400'} /> : null,
       };
 
-      // Use the agent's explicit vision flag; if unset, auto-detect from the model
-      const explicitVision = fullAgent.vision;
-      const agentModel =
-        (fullAgent.model_parameters as { model?: string })?.model ?? fullAgent.model;
-      const agentVision =
-        explicitVision !== undefined
-          ? explicitVision
-          : agentModel
-            ? validateVisionModel({
-                model: agentModel,
-                modelSpecs: startupConfig?.modelSpecs,
-              })
-            : false;
+      // The agent's explicit vision flag wins; unset means derive it from the model.
+      const agentVision = resolveAgentVision(fullAgent, startupConfig?.modelSpecs);
 
       const capabilities: TAgentCapabilities = {
         [AgentCapabilities.web_search]: false,
@@ -187,7 +191,7 @@ function AgentSelect({
 
       reset(formValues);
     },
-    [reset],
+    [reset, startupConfig?.modelSpecs],
   );
 
   const onSelect = useCallback(
