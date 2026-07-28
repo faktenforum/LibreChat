@@ -24,10 +24,10 @@ import {
 } from './hooks';
 import { computeToggleAction, skillsEnabledTransition } from './items/mutations';
 import { useListSkillsQuery, useDeleteAgentAction } from '~/data-provider';
+import useDeriveAgentVision from '~/hooks/Agents/useDeriveAgentVision';
 import { useRemoveMCPTool, useVisibleTools } from '~/hooks/MCP';
 import ToolsMarketplaceDialog from './ToolsMarketplaceDialog';
 import { useLocalize, useHasAccess } from '~/hooks';
-import useDeriveAgentVision from '~/hooks/Agents/useDeriveAgentVision';
 import { useAgentPanelContext } from '~/Providers';
 import { isEphemeralAgent, ESide } from '~/common';
 import ItemDialog from './ItemDialog/ItemDialog';

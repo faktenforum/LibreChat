@@ -32,11 +32,12 @@ import type {
 } from 'librechat-data-provider';
 import type { ExtendedFile, FileSetter } from '~/common';
 import {
-  useAgentToolPermissions,
-  useAgentCapabilities,
-  useGetAgentsConfig,
-  useFileHandlingNoChatContext,
   useLocalize,
+  useVisionModel,
+  useGetAgentsConfig,
+  useAgentCapabilities,
+  useAgentToolPermissions,
+  useFileHandlingNoChatContext,
 } from '~/hooks';
 import { useSharePointFileHandlingNoChatContext } from '~/hooks/Files/useSharePointFileHandling';
 import { useShortcutAriaKey, useShortcutHint } from '~/hooks/useKeyboardShortcuts';
@@ -45,7 +46,6 @@ import { useGetStartupConfig } from '~/data-provider';
 import { ephemeralAgentByConvoId } from '~/store';
 import { MenuItemProps } from '~/common';
 import { cn } from '~/utils';
-import { useVisionModel } from '~/hooks';
 
 type FileUploadType =
   | 'image'

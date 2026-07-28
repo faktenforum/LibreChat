@@ -1,7 +1,7 @@
 import { useMemo } from 'react';
 import { validateVisionModel } from 'librechat-data-provider';
-import { useChatContext } from '~/Providers';
 import { useGetStartupConfig } from '~/data-provider';
+import { useChatContext } from '~/Providers';
 
 /**
  * Hook to determine if the current conversation model supports vision capabilities.
@@ -16,7 +16,7 @@ export function useVisionModel(): boolean {
     if (!model) {
       return false;
     }
-    
+
     return validateVisionModel({
       model,
       modelSpecs: startupConfig?.modelSpecs,
