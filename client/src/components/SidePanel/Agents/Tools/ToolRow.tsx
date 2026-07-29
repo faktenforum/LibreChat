@@ -1,9 +1,9 @@
-import { memo, useState } from 'react';
+import { memo } from 'react';
 import { Info, Settings, X } from 'lucide-react';
 import type { TranslationKeys } from '~/hooks/useLocalize';
 import type { AgentItem } from './items/types';
 import { hasConfigurableSettings } from './items/configurable';
-import { getIconForItem } from './items/icons';
+import ItemIconBadge from './ItemIconBadge';
 import { useLocalize } from '~/hooks';
 import { cn } from '~/utils';
 
@@ -20,34 +20,7 @@ function getSuffix(item: AgentItem): string | null {
 }
 
 function RowIcon({ item }: { item: AgentItem }) {
-  const { Icon, colorClass, iconUrl } = getIconForItem(item);
-  const [imgError, setImgError] = useState(false);
-
-  if (iconUrl && !imgError) {
-    return (
-      <span
-        className="flex size-7 shrink-0 items-center justify-center overflow-hidden rounded-md bg-white"
-        aria-hidden="true"
-      >
-        <img
-          src={iconUrl}
-          alt=""
-          className="h-full w-full object-cover"
-          loading="lazy"
-          onError={() => setImgError(true)}
-        />
-      </span>
-    );
-  }
-
-  return (
-    <span
-      className={cn('flex size-7 shrink-0 items-center justify-center rounded-md', colorClass)}
-      aria-hidden="true"
-    >
-      <Icon className="size-3.5" strokeWidth={1.75} />
-    </span>
-  );
+  return <ItemIconBadge item={item} tileClassName="size-7 rounded-md" glyphClassName="size-3.5" />;
 }
 
 function ToolRowImpl({ item, onInfo, onRemove }: Props) {

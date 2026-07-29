@@ -1,10 +1,10 @@
-import { memo, useState } from 'react';
+import { memo } from 'react';
 import { BadgeCheck, Check, Globe, Info, Settings, Star, User } from 'lucide-react';
 import type { TranslationKeys } from '~/hooks/useLocalize';
 import type { AgentItem } from './items/types';
 import { hasConfigurableSettings } from './items/configurable';
 import { useLocalize, useAuthContext } from '~/hooks';
-import { getIconForItem } from './items/icons';
+import ItemIconBadge from './ItemIconBadge';
 import { cn } from '~/utils';
 
 interface ToolCardProps {
@@ -41,40 +41,11 @@ interface ItemIconProps {
 }
 
 function ItemIconView({ item, size }: ItemIconProps) {
-  const { Icon, colorClass, iconUrl } = getIconForItem(item);
-  const [imgError, setImgError] = useState(false);
-
   const tileClasses =
     size === 'md' ? 'h-10 w-10 rounded-xl text-base' : 'h-9 w-9 rounded-lg text-sm';
-  const iconClasses = size === 'md' ? 'h-[18px] w-[18px]' : 'h-[18px] w-[18px]';
-
-  if (iconUrl && !imgError) {
-    return (
-      <span
-        className={cn(
-          'flex shrink-0 items-center justify-center overflow-hidden bg-white',
-          tileClasses,
-        )}
-        aria-hidden="true"
-      >
-        <img
-          src={iconUrl}
-          alt=""
-          className="h-full w-full object-cover"
-          loading="lazy"
-          onError={() => setImgError(true)}
-        />
-      </span>
-    );
-  }
 
   return (
-    <span
-      className={cn('flex shrink-0 items-center justify-center', tileClasses, colorClass)}
-      aria-hidden="true"
-    >
-      <Icon className={iconClasses} strokeWidth={1.75} />
-    </span>
+    <ItemIconBadge item={item} tileClassName={tileClasses} glyphClassName="h-[18px] w-[18px]" />
   );
 }
 
