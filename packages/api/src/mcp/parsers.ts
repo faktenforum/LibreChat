@@ -9,10 +9,6 @@ function generateResourceId(text: string): string {
   return crypto.createHash('sha256').update(text).digest('hex').substring(0, 10);
 }
 
-// Known providers that are NOT OpenAI-compatible
-// This is a small, stable list that rarely changes
-const NON_OPENAI_PROVIDERS = new Set(['google', 'anthropic', 'bedrock', 'ollama']);
-
 function getMCPImageDataMaxBytes(): number {
   const raw = process.env.MCP_IMAGE_DATA_MAX_BYTES;
   if (!raw) {
@@ -58,6 +54,9 @@ function assertImageDataWithinLimit(item: t.ImageContent): void {
   );
 }
 
+/** Providers whose tool-result content shape is not OpenAI's. */
+const NON_OPENAI_PROVIDERS = new Set(['google', 'anthropic', 'bedrock', 'ollama']);
+
 const RECOGNIZED_PROVIDERS = new Set([
   'google',
   'anthropic',
@@ -68,30 +67,16 @@ const RECOGNIZED_PROVIDERS = new Set([
   'deepseek',
   'ollama',
   'bedrock',
-  // Note: Custom OpenAI-compatible endpoints (like scaleway, together, perplexity, etc.)
-  // are automatically recognized if they're not in NON_OPENAI_PROVIDERS
 ]);
 
 /**
- * Check if a provider should receive structured content formatting for MCP tool responses.
- *
- * Recognizes:
- * 1. Explicitly listed providers in RECOGNIZED_PROVIDERS
- * 2. Custom OpenAI-compatible endpoints (any provider not in NON_OPENAI_PROVIDERS)
- *
- * Custom endpoints are passed with their endpoint name (not "openai"), so we automatically
- * detect them rather than requiring explicit additions for each new provider.
+ * Upstream formats structured content only for `RECOGNIZED_PROVIDERS`. A custom endpoint
+ * arrives under its own name (`scaleway`, `together`, …), never `openai`, so it misses that
+ * list and its tool results get stringified - which loses the image artifacts. Treat an
+ * unlisted provider as OpenAI-compatible unless it is known not to be.
  */
 function isRecognizedProvider(provider: t.Provider): boolean {
-  if (RECOGNIZED_PROVIDERS.has(provider)) {
-    return true;
-  }
-
-  if (!NON_OPENAI_PROVIDERS.has(provider)) {
-    return true;
-  }
-
-  return false;
+  return RECOGNIZED_PROVIDERS.has(provider) || !NON_OPENAI_PROVIDERS.has(provider);
 }
 
 const imageFormatters: Record<string, undefined | t.ImageFormatter> = {

@@ -1,9 +1,21 @@
 const mongoose = require('mongoose');
 const { logger } = require('@librechat/data-schemas');
-const { setMCPToolsChangedHandler } = require('@librechat/api');
-const { mergeAppTools, getAppConfig } = require('./Config');
-const { replaceAppServerTools, cacheMCPServerTools } = require('./Config/mcp');
-const { createMCPServersRegistry, createMCPManager, getMCPManager } = require('~/config');
+const {
+  registerShutdownTask,
+  setMCPToolsChangedHandler,
+  getDeploymentPluginMcpServers,
+  setMCPToolsChangedGenerationHandler,
+  setMCPToolsChangedGenerationRenewalHandler,
+  setMCPToolsChangedRevisionHandler,
+} = require('@librechat/api');
+const { syncStaticTools, mergeAppTools, getAppConfig } = require('./Config');
+const {
+  getMCPToolsCacheGeneration,
+  renewMCPToolsCacheGeneration,
+  getNextAppToolsPublicationRevision,
+  updateMCPServerTools,
+} = require('./Config/mcp');
+const { createMCPServersRegistry, createMCPManager } = require('~/config');
 
 /**
  * Resolves the current request's effective MCP allowlists from the merged (tenant-scoped)
@@ -28,25 +40,57 @@ async function resolveMCPAllowlists(ctx) {
  * re-fetched from the live connection and written over that server's cache entry, so tools that
  * disappeared stop being advertised too.
  */
-async function refreshChangedServerTools({ serverName, userId }) {
-  const mcpManager = getMCPManager();
-  const serverTools = await mcpManager.getServerToolFunctions(userId ?? '', serverName);
-  if (!serverTools) {
-    logger.debug(
-      `[MCP][${serverName}] Tool list changed but no connection answered; leaving the cache alone`,
-    );
-    return;
-  }
-
-  const toolCount = Object.keys(serverTools).length;
-  if (userId) {
-    await cacheMCPServerTools({ userId, serverName, serverTools });
-  } else {
-    await replaceAppServerTools({ serverName, serverTools });
-  }
+async function refreshChangedServerTools({
+  serverName,
+  userId,
+  tools,
+  serverConfig,
+  publicationGeneration,
+  publicationRevision,
+}) {
+  await updateMCPServerTools({
+    userId,
+    serverName,
+    tools,
+    serverConfig,
+    ...(publicationGeneration && { publicationGeneration }),
+    ...(publicationRevision && { publicationRevision }),
+  });
+  const toolCount = tools.length;
   logger.info(
     `[MCP][${serverName}] Tool list changed; refreshed ${toolCount} ${toolCount === 1 ? 'tool' : 'tools'}${userId ? ` for user ${userId}` : ''}`,
   );
+}
+
+/**
+ * Merges Agent Plugins MCP servers under the configured servers. A plugin never
+ * displaces a server the operator declared in `librechat.yaml`.
+ */
+function withPluginServers(configured) {
+  const pluginServers = getDeploymentPluginMcpServers();
+  const names = Object.keys(pluginServers);
+  if (names.length === 0) {
+    return configured;
+  }
+
+  const merged = { ...configured };
+  for (const name of names) {
+    /** Own-property check: an inherited member like `toString` is not a conflict. */
+    if (Object.hasOwn(merged, name)) {
+      logger.warn(
+        `[MCP] Plugin server "${name}" conflicts with a configured server and was skipped.`,
+      );
+      continue;
+    }
+    /** Defined rather than assigned so a name like `__proto__` cannot reach a setter. */
+    Object.defineProperty(merged, name, {
+      value: pluginServers[name],
+      enumerable: true,
+      writable: true,
+      configurable: true,
+    });
+  }
+  return merged;
 }
 
 /**
@@ -54,7 +98,7 @@ async function refreshChangedServerTools({ serverName, userId }) {
  */
 async function initializeMCPs() {
   const appConfig = await getAppConfig({ baseOnly: true });
-  const mcpServers = appConfig.mcpConfig;
+  const mcpServers = withPluginServers(appConfig.mcpConfig);
 
   try {
     createMCPServersRegistry(
@@ -71,16 +115,27 @@ async function initializeMCPs() {
   try {
     const mcpManager = await createMCPManager(mcpServers || {});
     setMCPToolsChangedHandler(refreshChangedServerTools);
+    setMCPToolsChangedGenerationHandler(getMCPToolsCacheGeneration);
+    setMCPToolsChangedGenerationRenewalHandler(renewMCPToolsCacheGeneration);
+    setMCPToolsChangedRevisionHandler(({ serverName, configGeneration }) =>
+      getNextAppToolsPublicationRevision(serverName, configGeneration),
+    );
+    registerShutdownTask('MCP app connections', () => mcpManager.disconnectAppServers());
 
     if (mcpServers && Object.keys(mcpServers).length > 0) {
       const mcpTools = (await mcpManager.getAppToolFunctions()) || {};
-      await mergeAppTools(mcpTools);
+      try {
+        await mergeAppTools(mcpTools, appConfig.availableTools || {});
+      } finally {
+        await mcpManager.connectAppServers();
+      }
       const serverCount = Object.keys(mcpServers).length;
       const toolCount = Object.keys(mcpTools).length;
       logger.info(
         `[MCP] Initialized with ${serverCount} configured ${serverCount === 1 ? 'server' : 'servers'} and ${toolCount} ${toolCount === 1 ? 'tool' : 'tools'}.`,
       );
     } else {
+      await syncStaticTools(appConfig.availableTools || {});
       logger.debug('[MCP] No servers configured. MCPManager ready for UI-based servers.');
     }
   } catch (error) {

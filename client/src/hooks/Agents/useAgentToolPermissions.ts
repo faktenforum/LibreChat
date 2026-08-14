@@ -72,9 +72,7 @@ export default function useAgentToolPermissions(
     const vision = agent?.vision;
     if (vision !== undefined) return vision;
     const versions = (agent as { versions?: Array<{ vision?: boolean }> })?.versions;
-    return versions?.length
-      ? (versions[versions.length - 1]?.vision ?? false)
-      : false;
+    return versions?.length ? (versions[versions.length - 1]?.vision ?? false) : false;
   }, [agentId, agentData, selectedAgent]);
 
   return {

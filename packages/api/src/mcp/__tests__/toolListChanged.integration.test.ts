@@ -1,165 +1,362 @@
-/**
- * Integration test for `notifications/tools/list_changed` (#7117).
- *
- * Real MCP server, real transport, real MCPConnection: a server that registers a tool after the
- * connection is up must make the client re-fetch, which is what kept dynamic tools invisible until
- * a restart. Only the app-layer cache write is stubbed, since that is the boundary the connection
- * layer deliberately does not reach across.
- */
-import { z } from 'zod';
-import express from 'express';
-import { randomUUID } from 'node:crypto';
-import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
-import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
-import type { Server } from 'node:http';
-import { setMCPToolsChangedHandler, notifyMCPToolsChanged } from '../toolsChanged';
+/** Real-SDK integration coverage for `notifications/tools/list_changed` (#7117). */
+import { CacheKeys } from 'librechat-data-provider';
+import { Server } from '@modelcontextprotocol/sdk/server/index.js';
+import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
+import {
+  ErrorCode,
+  ListToolsRequestSchema,
+  McpError,
+  type Tool,
+} from '@modelcontextprotocol/sdk/types.js';
+import type { LCAvailableTools } from '../types';
+import {
+  getMCPAppToolsPublicationGeneration,
+  setMCPToolsChangedRevisionHandler,
+} from '../toolsChanged';
+import { createMCPCatalogStore } from '../catalog/store';
 import { MCPConnection } from '../connection';
 
-jest.setTimeout(30000);
+jest.setTimeout(10_000);
 
-/**
- * Waits for a condition instead of sleeping a fixed amount: the notification travels over a real
- * socket, so a fixed wait is a flake under parallel test load.
- */
-async function waitFor(condition: () => boolean, timeoutMs = 5000): Promise<void> {
+async function waitFor(condition: () => boolean, timeoutMs = 3_000): Promise<void> {
   const deadline = Date.now() + timeoutMs;
   while (!condition()) {
     if (Date.now() >= deadline) {
-      throw new Error('Timed out waiting for the notification to arrive');
+      throw new Error('Timed out waiting for the tool-list refresh');
     }
-    await new Promise((resolve) => setTimeout(resolve, 25));
+    await new Promise((resolve) => setTimeout(resolve, 10));
   }
 }
 
-interface RunningServer {
-  url: string;
-  addTool: (name: string) => void;
+interface Barrier {
+  entered: Promise<void>;
+  release: () => void;
+}
+
+interface TestHarness {
+  connection: MCPConnection;
+  getListCalls: () => number;
+  setTools: (tools: Tool[]) => void;
+  failNextList: () => void;
+  blockNextList: () => Barrier;
+  notifyChanged: () => Promise<void>;
   close: () => Promise<void>;
 }
 
-async function startDynamicToolServer(): Promise<RunningServer> {
-  const mcpServer = new McpServer(
+const tool = (name: string, description = name): Tool => ({
+  name,
+  description,
+  inputSchema: { type: 'object', properties: {} },
+});
+
+async function createHarness(initialTools: Tool[]): Promise<TestHarness> {
+  let tools = initialTools;
+  let listCalls = 0;
+  let shouldFailNextList = false;
+  let nextBarrier:
+    | {
+        entered: Promise<void>;
+        resolveEntered: () => void;
+        released: Promise<void>;
+        release: () => void;
+      }
+    | undefined;
+
+  const server = new Server(
     { name: 'dynamic-tool-server', version: '1.0.0' },
     { capabilities: { tools: { listChanged: true } } },
   );
+  server.setRequestHandler(ListToolsRequestSchema, async () => {
+    listCalls++;
+    if (shouldFailNextList) {
+      shouldFailNextList = false;
+      throw new McpError(ErrorCode.InternalError, 'temporary tools/list failure');
+    }
 
-  mcpServer.registerTool(
-    'initial_tool',
-    { description: 'Present from the start', inputSchema: { value: z.string() } },
-    async () => ({ content: [{ type: 'text' as const, text: 'ok' }] }),
-  );
-
-  const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: () => randomUUID() });
-  await mcpServer.connect(transport);
-
-  const app = express();
-  app.use(express.json());
-  app.all('/mcp', (req, res) => {
-    void transport.handleRequest(req, res, req.body);
+    const snapshot = tools.map((entry) => ({ ...entry }));
+    const barrier = nextBarrier;
+    nextBarrier = undefined;
+    if (barrier) {
+      barrier.resolveEntered();
+      await barrier.released;
+    }
+    return { tools: snapshot };
   });
 
-  const httpServer: Server = await new Promise((resolve) => {
-    const server = app.listen(0, '127.0.0.1', () => resolve(server));
+  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+  await server.connect(serverTransport);
+
+  const connection = new MCPConnection({
+    serverName: 'dynamic',
+    serverConfig: { type: 'streamable-http', url: 'https://mcp.example.com' },
   });
-  const { port } = httpServer.address() as { port: number };
+  await connection.client.connect(clientTransport);
+  connection.emit('connectionChange', 'connected');
 
   return {
-    url: `http://127.0.0.1:${port}/mcp`,
-    /* registerTool on a connected server emits notifications/tools/list_changed by itself - the
-     * same thing a server building tools at runtime does. */
-    addTool: (name: string) =>
-      mcpServer.registerTool(
-        name,
-        { description: `Added at runtime: ${name}`, inputSchema: { value: z.string() } },
-        async () => ({ content: [{ type: 'text' as const, text: 'ok' }] }),
-      ),
+    connection,
+    getListCalls: () => listCalls,
+    setTools: (nextTools) => {
+      tools = nextTools;
+    },
+    failNextList: () => {
+      shouldFailNextList = true;
+    },
+    blockNextList: () => {
+      let resolveEntered: (() => void) | undefined;
+      let release: (() => void) | undefined;
+      const entered = new Promise<void>((resolve) => {
+        resolveEntered = resolve;
+      });
+      const released = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      nextBarrier = {
+        entered,
+        resolveEntered: () => resolveEntered?.(),
+        released,
+        release: () => release?.(),
+      };
+      return { entered, release: () => release?.() };
+    },
+    notifyChanged: () => server.sendToolListChanged(),
     close: async () => {
-      await mcpServer.close();
-      await new Promise<void>((resolve) => httpServer.close(() => resolve()));
+      connection.removeAllListeners();
+      await connection.client.close().catch(() => undefined);
+      await server.close().catch(() => undefined);
     },
   };
 }
 
 describe('tools/list_changed', () => {
-  let server: RunningServer;
-  let connection: MCPConnection;
+  let harness: TestHarness | undefined;
 
   afterEach(async () => {
-    setMCPToolsChangedHandler(null);
-    await connection?.disconnect();
-    await server?.close();
+    setMCPToolsChangedRevisionHandler(null);
+    await harness?.close();
+    harness = undefined;
   });
 
-  it('re-fetches the tool list when the server adds a tool after connecting', async () => {
-    server = await startDynamicToolServer();
-    connection = new MCPConnection({
-      serverName: 'dynamic',
-      serverConfig: { type: 'streamable-http', url: server.url },
-    });
+  it('publishes additions, removals, and schema changes from refreshed snapshots', async () => {
+    harness = await createHarness([tool('initial', 'version one')]);
+    const snapshots: Tool[][] = [];
+    harness.connection.on('toolsChanged', (tools: Tool[]) => snapshots.push(tools));
+    await harness.connection.fetchTools();
 
-    const changes: string[] = [];
-    connection.on('toolsChanged', () => {
-      changes.push('toolsChanged');
-    });
+    harness.setTools([tool('initial', 'version one'), tool('added')]);
+    await harness.notifyChanged();
+    await waitFor(() => snapshots.length === 1);
+    expect(snapshots[0].map(({ name }) => name)).toEqual(['initial', 'added']);
 
-    await connection.connect();
-    const before = await connection.fetchTools();
-    expect(before.map((tool) => tool.name)).toEqual(['initial_tool']);
+    harness.setTools([
+      {
+        ...tool('initial', 'version two'),
+        inputSchema: { type: 'object', properties: { query: { type: 'string' } } },
+      },
+    ]);
+    await harness.notifyChanged();
+    await waitFor(() => snapshots.length === 2);
 
-    server.addTool('added_later');
-    await waitFor(() => changes.length === 1);
-
-    expect(changes).toEqual(['toolsChanged']);
-    const after = await connection.fetchTools();
-    expect(after.map((tool) => tool.name).sort()).toEqual(['added_later', 'initial_tool']);
+    expect(snapshots[1]).toEqual([
+      expect.objectContaining({
+        name: 'initial',
+        description: 'version two',
+        inputSchema: expect.objectContaining({
+          properties: { query: { type: 'string' } },
+        }),
+      }),
+    ]);
   });
 
-  it('routes the change to the registered handler with the server name', async () => {
-    server = await startDynamicToolServer();
-    connection = new MCPConnection({
-      serverName: 'dynamic',
-      serverConfig: { type: 'streamable-http', url: server.url },
-    });
+  it('does not lose a notification that arrives while a refresh is in flight', async () => {
+    harness = await createHarness([tool('initial')]);
+    const snapshots: Tool[][] = [];
+    harness.connection.on('toolsChanged', (tools: Tool[]) => snapshots.push(tools));
+    await harness.connection.fetchTools();
 
-    const refreshed: Array<{ serverName: string; userId?: string }> = [];
-    setMCPToolsChangedHandler((event) => {
-      refreshed.push(event);
-    });
-    /* The repository wires this when it creates a connection; the connection itself only emits. */
-    connection.on('toolsChanged', () => {
-      void notifyMCPToolsChanged({ serverName: 'dynamic', userId: 'user-42' });
-    });
+    const barrier = harness.blockNextList();
+    harness.setTools([tool('initial'), tool('stale')]);
+    await harness.notifyChanged();
+    await barrier.entered;
 
-    await connection.connect();
-    /* One round-trip first: notifications only reach a client whose stream is up, and a real client
-     * lists tools right after connecting anyway. */
-    await connection.fetchTools();
-    server.addTool('second_tool');
-    await waitFor(() => refreshed.length === 1);
+    harness.setTools([tool('initial'), tool('latest')]);
+    await harness.notifyChanged();
+    barrier.release();
+    await waitFor(() => snapshots.length === 2);
 
-    expect(refreshed).toEqual([{ serverName: 'dynamic', userId: 'user-42' }]);
+    expect(snapshots[0].map(({ name }) => name)).toEqual(['initial', 'stale']);
+    expect(snapshots[1].map(({ name }) => name)).toEqual(['initial', 'latest']);
   });
 
-  it('emits once per change, so several additions are each picked up', async () => {
-    server = await startDynamicToolServer();
-    connection = new MCPConnection({
-      serverName: 'dynamic',
-      serverConfig: { type: 'streamable-http', url: server.url },
+  it('keeps a newer cross-replica snapshot when an older request finishes last', async () => {
+    const olderReplica = await createHarness([tool('initial')]);
+    const newerReplica = await createHarness([tool('initial')]);
+    const cache = new Map<string, unknown>();
+    const store = createMCPCatalogStore({
+      cacheConfig: { FORCED_IN_MEMORY_CACHE_NAMESPACES: [CacheKeys.TOOL_CACHE] },
+      getCache: () => ({
+        get: async (key) => cache.get(key),
+        set: async (key, value) => {
+          cache.set(key, value);
+          return true;
+        },
+        delete: async (key) => cache.delete(key),
+      }),
     });
-
-    let changes = 0;
-    connection.on('toolsChanged', () => {
-      changes++;
+    const configGeneration = getMCPAppToolsPublicationGeneration({
+      type: 'streamable-http',
+      url: 'https://mcp.example.com',
     });
+    setMCPToolsChangedRevisionHandler(({ serverName, configGeneration }) =>
+      store.getNextAppToolsPublicationRevision(serverName, configGeneration),
+    );
+    const publications: Promise<boolean>[] = [];
+    const publish = (tools: Tool[], publicationRevision?: string) => {
+      const catalog: LCAvailableTools = Object.fromEntries(
+        tools.map(({ name }) => [name, { type: 'function', function: { name } }]),
+      );
+      publications.push(
+        store.setCachedAppServerTools('dynamic', configGeneration, catalog, publicationRevision),
+      );
+    };
+    olderReplica.connection.on('toolsChanged', publish);
+    newerReplica.connection.on('toolsChanged', publish);
 
-    await connection.connect();
-    await connection.fetchTools();
-    server.addTool('one');
-    server.addTool('two');
-    await waitFor(() => changes === 2);
+    try {
+      const barrier = olderReplica.blockNextList();
+      olderReplica.setTools([tool('stale')]);
+      await olderReplica.notifyChanged();
+      await barrier.entered;
 
-    expect(changes).toBe(2);
-    const tools = await connection.fetchTools();
-    expect(tools).toHaveLength(3);
+      newerReplica.setTools([tool('current')]);
+      await newerReplica.notifyChanged();
+      await waitFor(() => publications.length === 1);
+      await Promise.all(publications);
+
+      barrier.release();
+      await waitFor(() => publications.length === 2);
+      await Promise.all(publications);
+
+      await expect(store.getCachedAppServerTools('dynamic', configGeneration)).resolves.toEqual({
+        current: { type: 'function', function: { name: 'current' } },
+      });
+    } finally {
+      await Promise.all([olderReplica.close(), newerReplica.close()]);
+    }
+  });
+
+  it('does not publish an in-flight snapshot after the connection is disconnected', async () => {
+    harness = await createHarness([tool('initial')]);
+    const snapshots: Tool[][] = [];
+    harness.connection.on('toolsChanged', (tools: Tool[]) => snapshots.push(tools));
+    await harness.connection.fetchTools();
+
+    const barrier = harness.blockNextList();
+    harness.setTools([tool('initial'), tool('stale-after-disconnect')]);
+    await harness.notifyChanged();
+    await barrier.entered;
+    await harness.connection.disconnect();
+    barrier.release();
+    await new Promise((resolve) => setTimeout(resolve, 25));
+
+    expect(snapshots).toEqual([]);
+  });
+
+  it('discards an old transport snapshot when disconnect and reconnect race the refresh', async () => {
+    harness = await createHarness([tool('initial')]);
+    const snapshots: Tool[][] = [];
+    harness.connection.on('toolsChanged', (tools: Tool[]) => snapshots.push(tools));
+    await harness.connection.fetchTools();
+
+    const barrier = harness.blockNextList();
+    harness.setTools([tool('initial'), tool('stale-transport')]);
+    await harness.notifyChanged();
+    await barrier.entered;
+
+    harness.connection.emit('connectionChange', 'disconnected');
+    harness.setTools([tool('initial'), tool('latest-transport')]);
+    harness.connection.emit('connectionChange', 'connected');
+    barrier.release();
+
+    await waitFor(() => snapshots.length === 1);
+    expect(snapshots[0].map(({ name }) => name)).toEqual(['initial', 'latest-transport']);
+  });
+
+  it('refreshes after reconnect when the server changed tools while notifications were unavailable', async () => {
+    harness = await createHarness([tool('initial')]);
+    const snapshots: Tool[][] = [];
+    harness.connection.on('toolsChanged', (tools: Tool[]) => snapshots.push(tools));
+    await harness.connection.fetchTools();
+
+    harness.connection.emit('connectionChange', 'disconnected');
+    harness.setTools([tool('initial'), tool('added-while-disconnected')]);
+    harness.connection.emit('connectionChange', 'connected');
+
+    await waitFor(() => snapshots.length === 1);
+    expect(snapshots[0].map(({ name }) => name)).toEqual(['initial', 'added-while-disconnected']);
+  });
+
+  it('publishes an empty snapshot when a reconnect no longer advertises tools', async () => {
+    harness = await createHarness([tool('initial')]);
+    const snapshots: Tool[][] = [];
+    harness.connection.on('toolsChanged', (tools: Tool[]) => snapshots.push(tools));
+    await harness.connection.fetchTools();
+    jest.spyOn(harness.connection.client, 'getServerCapabilities').mockReturnValue({});
+
+    harness.connection.emit('connectionChange', 'disconnected');
+    harness.connection.emit('connectionChange', 'connected');
+
+    await waitFor(() => snapshots.length === 1);
+    expect(snapshots[0]).toEqual([]);
+  });
+
+  it('clears a recreated connection when its current server no longer advertises tools', async () => {
+    harness = await createHarness([tool('initial')]);
+    const snapshots: Tool[][] = [];
+    harness.connection.on('toolsChanged', (tools: Tool[]) => snapshots.push(tools));
+    await harness.connection.fetchTools();
+    jest.spyOn(harness.connection.client, 'getServerCapabilities').mockReturnValue({});
+
+    await harness.connection.refreshToolList();
+
+    expect(snapshots).toEqual([[]]);
+  });
+
+  it('retains the last good catalog and retries after a transient list failure', async () => {
+    harness = await createHarness([tool('initial')]);
+    const snapshots: Tool[][] = [];
+    harness.connection.on('toolsChanged', (tools: Tool[]) => snapshots.push(tools));
+    await harness.connection.fetchTools();
+    const callsBeforeNotification = harness.getListCalls();
+
+    harness.setTools([tool('initial'), tool('recovered')]);
+    harness.failNextList();
+    await harness.notifyChanged();
+    await waitFor(() => harness!.getListCalls() > callsBeforeNotification);
+    expect(snapshots).toEqual([]);
+
+    await waitFor(() => snapshots.length === 1);
+    expect(snapshots[0].map(({ name }) => name)).toEqual(['initial', 'recovered']);
+  });
+
+  it('retries when shared publication ordering is temporarily unavailable', async () => {
+    harness = await createHarness([tool('initial')]);
+    const snapshots: Array<{ tools: Tool[]; revision?: string }> = [];
+    const allocateRevision = jest
+      .fn<Promise<string>, [{ serverName: string; configGeneration: string }]>()
+      .mockRejectedValueOnce(new Error('Redis unavailable'))
+      .mockResolvedValue('1');
+    setMCPToolsChangedRevisionHandler(allocateRevision);
+    harness.connection.on('toolsChanged', (tools: Tool[], revision?: string) =>
+      snapshots.push({ tools, revision }),
+    );
+
+    harness.setTools([tool('recovered')]);
+    await harness.notifyChanged();
+    expect(snapshots).toEqual([]);
+
+    await waitFor(() => snapshots.length === 1);
+    expect(snapshots[0]).toEqual({ tools: [tool('recovered')], revision: '1' });
+    expect(allocateRevision).toHaveBeenCalledTimes(2);
   });
 });

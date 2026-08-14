@@ -11,11 +11,11 @@ interface AgentCapabilitiesResult {
   webSearchEnabled: boolean;
   codeEnabled: boolean;
   skillsEnabled: boolean;
-  visionEnabled: boolean;
   memoryEnabled: boolean;
   deferredToolsEnabled: boolean;
   programmaticToolsEnabled: boolean;
   backgroundToolsEnabled: boolean;
+  toolIntentsEnabled: boolean;
 }
 
 export default function useAgentCapabilities(
@@ -66,11 +66,6 @@ export default function useAgentCapabilities(
     [capabilities],
   );
 
-  const visionEnabled = useMemo(
-    () => capabilities?.includes(AgentCapabilities.vision) ?? false,
-    [capabilities],
-  );
-
   const memoryEnabled = useMemo(
     () => capabilities?.includes(AgentCapabilities.memory) ?? false,
     [capabilities],
@@ -91,6 +86,11 @@ export default function useAgentCapabilities(
     [capabilities],
   );
 
+  const toolIntentsEnabled = useMemo(
+    () => capabilities?.includes(AgentCapabilities.tool_intents) ?? false,
+    [capabilities],
+  );
+
   return {
     ocrEnabled,
     codeEnabled,
@@ -102,9 +102,9 @@ export default function useAgentCapabilities(
     artifactsEnabled,
     webSearchEnabled,
     fileSearchEnabled,
-    visionEnabled,
     deferredToolsEnabled,
     programmaticToolsEnabled,
     backgroundToolsEnabled,
+    toolIntentsEnabled,
   };
 }

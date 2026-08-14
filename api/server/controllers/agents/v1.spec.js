@@ -321,6 +321,35 @@ describe('Agent Controllers - Mass Assignment Protection', () => {
       expect(agentInDb.tool_resources.invalid_resource).toBeUndefined();
     });
 
+    test('should strip runtime file records before persisting an agent', async () => {
+      mockReq.body = {
+        provider: 'openai',
+        model: 'gpt-4',
+        name: 'Agent with forged runtime file',
+        tool_resources: {
+          execute_code: {
+            files: [
+              {
+                file_id: 'forged-file',
+                filepath: '/etc/passwd',
+                source: FileSources.local,
+              },
+            ],
+          },
+        },
+      };
+
+      await createAgentHandler(mockReq, mockRes);
+
+      expect(mockRes.status).toHaveBeenCalledWith(201);
+      const createdAgent = mockRes.json.mock.calls[0][0];
+      expect(createdAgent.tool_resources?.execute_code?.files).toBeUndefined();
+
+      const agentInDb = await Agent.findOne({ id: createdAgent.id }).lean();
+      expect(agentInDb.tool_resources?.execute_code?.files).toBeUndefined();
+      expect(agentInDb.versions[0].tool_resources?.execute_code?.files).toBeUndefined();
+    });
+
     test('should strip file_ids not owned by the creator from tool_resources', async () => {
       const File = mongoose.models.File;
 
@@ -603,10 +632,30 @@ describe('Agent Controllers - Mass Assignment Protection', () => {
 
       expect(mockRes.status).toHaveBeenCalledWith(200);
       const response = mockRes.json.mock.calls[0][0];
-      expect(response.owner_contact).toEqual({
-        name: 'Primary Owner',
-        email: 'primary.owner@example.com',
+      expect(response.owner_contact).toEqual({ name: 'Primary Owner' });
+      expect(response.owner_contact).not.toHaveProperty('email');
+    });
+
+    test('should omit owner_contact when the owner name and username are the account email', async () => {
+      const email = 'sso.owner@example.com';
+      const owner = await createOwner({ name: email, username: email, email });
+      const agent = await Agent.create({
+        id: `agent_${uuidv4()}`,
+        name: 'SSO Owner Agent',
+        description: 'Owner has email-shaped name from SSO fallback',
+        provider: 'openai',
+        model: 'gpt-4',
+        author: owner._id,
       });
+      await grantAgentOwner({ agent, owner });
+
+      mockReq.params = { id: agent.id };
+
+      await getAgentHandler(mockReq, mockRes);
+
+      expect(mockRes.status).toHaveBeenCalledWith(200);
+      const response = mockRes.json.mock.calls[0][0];
+      expect(response.owner_contact).toBeUndefined();
     });
 
     test('should not return owner_contact when support_contact is present', async () => {
@@ -918,6 +967,32 @@ describe('Agent Controllers - Mass Assignment Protection', () => {
       expect(updatedAgent.tool_resources.context).toBeDefined();
       expect(updatedAgent.tool_resources.execute_code).toBeDefined();
       expect(updatedAgent.tool_resources.invalid_tool).toBeUndefined();
+    });
+
+    test('should strip runtime file records before persisting an update', async () => {
+      mockReq.user.id = existingAgentAuthorId.toString();
+      mockReq.params.id = existingAgentId;
+      mockReq.body = {
+        tool_resources: {
+          execute_code: {
+            files: [
+              {
+                file_id: 'forged-file',
+                filepath: '/etc/passwd',
+                source: FileSources.local,
+              },
+            ],
+          },
+        },
+      };
+
+      await updateAgentHandler(mockReq, mockRes);
+
+      expect(mockRes.json).toHaveBeenCalled();
+      const agentInDb = await Agent.findOne({ id: existingAgentId }).lean();
+      expect(agentInDb.tool_resources.execute_code.files).toBeUndefined();
+      const latestVersion = agentInDb.versions[agentInDb.versions.length - 1];
+      expect(latestVersion.tool_resources.execute_code.files).toBeUndefined();
     });
 
     test('should remove empty strings from model_parameters during update (Issue Fix)', async () => {
@@ -1556,10 +1631,8 @@ describe('Agent Controllers - Mass Assignment Protection', () => {
       await getListAgentsHandler(mockReq, mockRes);
 
       const response = mockRes.json.mock.calls[0][0];
-      expect(response.data[0].owner_contact).toEqual({
-        name: 'List Owner',
-        email: 'list.owner@example.com',
-      });
+      expect(response.data[0].owner_contact).toEqual({ name: 'List Owner' });
+      expect(response.data[0].owner_contact).not.toHaveProperty('email');
     });
 
     test('should use the first ACL owner when an agent has multiple owners', async () => {
@@ -1589,10 +1662,7 @@ describe('Agent Controllers - Mass Assignment Protection', () => {
       await getListAgentsHandler(mockReq, mockRes);
 
       const response = mockRes.json.mock.calls[0][0];
-      expect(response.data[0].owner_contact).toEqual({
-        name: 'First Owner',
-        email: 'first.owner@example.com',
-      });
+      expect(response.data[0].owner_contact).toEqual({ name: 'First Owner' });
     });
 
     test('should omit owner_contact when no owner user can be resolved', async () => {
@@ -1604,6 +1674,65 @@ describe('Agent Controllers - Mass Assignment Protection', () => {
 
       const response = mockRes.json.mock.calls[0][0];
       expect(response.data[0].owner_contact).toBeUndefined();
+    });
+
+    test('should mark isEditable per agent on a VIEW-scoped list', async () => {
+      mockReq.user.id = userA.toString();
+      mockReq.query = { requiredPermission: String(PermissionBits.VIEW) };
+      /** VIEW reaches all three; the EDIT lookup only reaches agentA1. */
+      findAccessibleResources.mockImplementation(({ resourceType, requiredPermissions }) => {
+        if (resourceType === 'agent' && requiredPermissions === PermissionBits.EDIT) {
+          return Promise.resolve([agentA1._id]);
+        }
+        if (resourceType === 'agent') {
+          return Promise.resolve([agentA1._id, agentA2._id, agentA3._id]);
+        }
+        return Promise.resolve([]);
+      });
+      findPubliclyAccessibleResources.mockResolvedValue([]);
+
+      await getListAgentsHandler(mockReq, mockRes);
+
+      const byId = Object.fromEntries(
+        mockRes.json.mock.calls[0][0].data.map((a) => [a.id, a.isEditable]),
+      );
+      expect(byId[agentA1.id]).toBe(true);
+      expect(byId[agentA2.id]).toBe(false);
+      expect(byId[agentA3.id]).toBe(false);
+    });
+
+    test('should forward idOnTheSource to every ACL lookup', async () => {
+      /** Without it `getUserPrincipals` reads the user document once per lookup, so the
+       *  handler pays an extra `User.findById` for each permission it resolves. */
+      mockReq.user.id = userA.toString();
+      mockReq.user.idOnTheSource = 'external-oid-1';
+      findAccessibleResources.mockResolvedValue([agentA1._id]);
+      findPubliclyAccessibleResources.mockResolvedValue([]);
+
+      await getListAgentsHandler(mockReq, mockRes);
+
+      expect(findAccessibleResources.mock.calls.length).toBeGreaterThan(1);
+      for (const [args] of findAccessibleResources.mock.calls) {
+        expect(args.idOnTheSource).toBe('external-oid-1');
+      }
+    });
+
+    test('should mark every agent editable when the request is already EDIT-scoped', async () => {
+      mockReq.user.id = userA.toString();
+      mockReq.query = { requiredPermission: String(PermissionBits.EDIT) };
+      findAccessibleResources.mockResolvedValue([agentA1._id, agentA2._id]);
+      findPubliclyAccessibleResources.mockResolvedValue([]);
+
+      await getListAgentsHandler(mockReq, mockRes);
+
+      const response = mockRes.json.mock.calls[0][0];
+      expect(response.data.every((a) => a.isEditable === true)).toBe(true);
+      /** No extra EDIT lookup: an EDIT-scoped match is editable by definition. */
+      const editCalls = findAccessibleResources.mock.calls.filter(
+        ([args]) =>
+          args.resourceType === 'agent' && args.requiredPermissions === PermissionBits.EDIT,
+      );
+      expect(editCalls).toHaveLength(1);
     });
 
     test('should return only expected safe list fields for VIEW callers', async () => {
@@ -1651,6 +1780,7 @@ describe('Agent Controllers - Mass Assignment Protection', () => {
           'conversation_starters',
           'description',
           'id',
+          'isEditable',
           'is_promoted',
           'name',
           'support_contact',
@@ -2163,6 +2293,110 @@ describe('Agent Controllers - Mass Assignment Protection', () => {
 
       // Verify response was returned
       expect(mockRes.json).toHaveBeenCalled();
+    });
+
+    test('should finish avatar writes before snapshotting the paginated list query', async () => {
+      /** `updateAgent` bumps `updatedAt`, which is the field `getListAgentsByAccess`
+       *  sorts and cursors on. If the list query snapshots before a refresh write
+       *  lands, that agent jumps ahead of the returned cursor and vanishes from every
+       *  later page. Assert the ordering rather than the symptom, which only shows up
+       *  on multi-page S3 accounts under a specific interleaving. */
+      const db = require('~/models');
+      const order = [];
+      /** Yield a macrotask so a parallelized refresh would lose the race, the way a real
+       *  S3 presign round trip does. */
+      refreshS3Url.mockImplementation(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 5));
+        order.push('avatar-write');
+        return 'new-s3-path.jpg';
+      });
+      const realList = db.getListAgentsByAccess;
+      const listSpy = jest.spyOn(db, 'getListAgentsByAccess').mockImplementation(async (params) => {
+        if (params.includeSkillConfig) {
+          order.push('list-query');
+          return { object: 'list', data: [], has_more: false, after: null };
+        }
+        return realList(params);
+      });
+      mockCache.get.mockResolvedValue(false);
+      findAccessibleResources.mockResolvedValue([agentWithS3Avatar._id]);
+      findPubliclyAccessibleResources.mockResolvedValue([]);
+
+      const mockReq = { user: { id: userA.toString(), role: 'USER' }, query: {} };
+      const mockRes = { status: jest.fn().mockReturnThis(), json: jest.fn().mockReturnThis() };
+
+      try {
+        await getListAgentsHandler(mockReq, mockRes);
+        expect(order).toContain('avatar-write');
+        expect(order.indexOf('avatar-write')).toBeLessThan(order.indexOf('list-query'));
+      } finally {
+        listSpy.mockRestore();
+        refreshS3Url.mockReset();
+      }
+    });
+
+    test('should serve the refreshed filepath in the same response on cache miss', async () => {
+      const agentId = agentWithS3Avatar.id;
+      mockCache.get.mockResolvedValue(false);
+      findAccessibleResources.mockResolvedValue([agentWithS3Avatar._id]);
+      findPubliclyAccessibleResources.mockResolvedValue([]);
+      refreshS3Url.mockResolvedValue('new-s3-path.jpg');
+
+      const mockReq = {
+        user: { id: userA.toString(), role: 'USER' },
+        query: {},
+      };
+      const mockRes = {
+        status: jest.fn().mockReturnThis(),
+        json: jest.fn().mockReturnThis(),
+      };
+
+      await getListAgentsHandler(mockReq, mockRes);
+
+      const responseData = mockRes.json.mock.calls[0][0];
+      const agent = responseData.data.find((a) => a.id === agentId);
+      /** The refresh runs alongside the list query, so the refreshed path must reach the
+       *  response through `urlCache` rather than through what the list query read. */
+      expect(agent.avatar.filepath).toBe('new-s3-path.jpg');
+    });
+
+    test('should scope the refresh query to S3 avatars without filtering the list query', async () => {
+      const db = require('~/models');
+      const listSpy = jest.spyOn(db, 'getListAgentsByAccess');
+      mockCache.get.mockResolvedValue(false);
+      findAccessibleResources.mockResolvedValue([agentWithLocalAvatar._id]);
+      findPubliclyAccessibleResources.mockResolvedValue([]);
+
+      const mockReq = {
+        user: { id: userA.toString(), role: 'USER' },
+        query: {},
+      };
+      const mockRes = {
+        status: jest.fn().mockReturnThis(),
+        json: jest.fn().mockReturnThis(),
+      };
+
+      try {
+        await getListAgentsHandler(mockReq, mockRes);
+
+        /** The refresh pass must query only S3-avatar agents — `refreshListAvatars`
+         *  skips non-S3 entries anyway, so without this assertion the filter could
+         *  regress to `{}` (reloading the whole accessible set) unnoticed. */
+        expect(listSpy).toHaveBeenCalledWith(
+          expect.objectContaining({ otherParams: { 'avatar.source': FileSources.s3 } }),
+        );
+        /** The user-facing list query keeps the request filter, not the refresh scope. */
+        expect(listSpy).toHaveBeenCalledWith(
+          expect.objectContaining({ includeSkillConfig: true, otherParams: {} }),
+        );
+
+        expect(refreshS3Url).not.toHaveBeenCalled();
+        const responseData = mockRes.json.mock.calls[0][0];
+        const agent = responseData.data.find((a) => a.id === agentWithLocalAvatar.id);
+        expect(agent.avatar.filepath).toBe('local-path.jpg');
+      } finally {
+        listSpy.mockRestore();
+      }
     });
 
     test('should refresh avatars for all accessible agents (VIEW permission)', async () => {

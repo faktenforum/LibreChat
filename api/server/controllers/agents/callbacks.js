@@ -76,6 +76,21 @@ async function recordToolCost({ req, cost, toolName, metadata }) {
   return null;
 }
 
+/** Queues billing for a tool that reported a provider cost; a failure must not fail the run. */
+function queueToolCost({ artifactPromises, req, output, metadata }) {
+  if (!output.artifact.cost) {
+    return;
+  }
+  artifactPromises.push(
+    recordToolCost({ req, cost: output.artifact.cost, toolName: output.name, metadata }).catch(
+      (error) => {
+        logger.error('[recordToolCost] Error billing tool cost:', error);
+        return null;
+      },
+    ),
+  );
+}
+
 function isHostFileAuthoringArtifact(artifact) {
   return artifact?.[HOST_FILE_AUTHORING_ARTIFACT_KEY] === true;
 }
@@ -786,19 +801,7 @@ function createToolEndCallback({ req, res, artifactPromises, streamId = null, jo
       return;
     }
 
-    if (output.artifact.cost) {
-      artifactPromises.push(
-        recordToolCost({
-          req,
-          cost: output.artifact.cost,
-          toolName: output.name,
-          metadata,
-        }).catch((error) => {
-          logger.error('[recordToolCost] Error billing tool cost:', error);
-          return null;
-        }),
-      );
-    }
+    queueToolCost({ artifactPromises, req, output, metadata });
 
     if (output.artifact[Tools.file_search]) {
       artifactPromises.push(
@@ -1140,19 +1143,7 @@ function createResponsesToolEndCallback({ req, res, tracker, artifactPromises })
       return;
     }
 
-    if (output.artifact.cost) {
-      artifactPromises.push(
-        recordToolCost({
-          req,
-          cost: output.artifact.cost,
-          toolName: output.name,
-          metadata,
-        }).catch((error) => {
-          logger.error('[recordToolCost] Error billing tool cost:', error);
-          return null;
-        }),
-      );
-    }
+    queueToolCost({ artifactPromises, req, output, metadata });
 
     if (output.artifact[Tools.file_search]) {
       artifactPromises.push(
