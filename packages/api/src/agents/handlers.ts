@@ -1,7 +1,7 @@
 import yaml from 'js-yaml';
 import { Types } from 'mongoose';
-import { logger } from '@librechat/data-schemas';
 import { GraphEvents, Constants } from '@librechat/agents';
+import { logger, normalizeSkillFrontmatterKeys } from '@librechat/data-schemas';
 import type {
   LCTool,
   EventHandler,
@@ -12,8 +12,9 @@ import type {
   ToolExecuteBatchRequest,
 } from '@librechat/agents';
 import type { StructuredToolInterface } from '@librechat/agents/langchain/tools';
+import type { ValidationIssue } from '@librechat/data-schemas';
 import type { CodeEnvRef } from 'librechat-data-provider';
-import type { SkillFileRecord } from './skillFiles';
+import type { SkillFileRecord, PrimeSkillFilesResult } from './skillFiles';
 import type { ServerRequest } from '~/types';
 import {
   backgroundTaskRegistry,
@@ -37,6 +38,12 @@ import {
   HOST_FILE_AUTHORING_ARTIFACT_KEY,
   isCodeSessionToolName,
 } from './tools';
+import {
+  hasIntentArg,
+  stripIntentArg,
+  stripIntentLabelsFromToolDefinitions,
+  INTENT_ARG,
+} from './intent';
 import { logAxiosError, runOutsideTracing, truncateMiddle } from '~/utils';
 import { buildSkillPrimeMessage, SKILL_FILE_PREFIX } from './skills';
 import { parseFrontmatter } from '../skills/import';
@@ -163,6 +170,7 @@ export interface ToolExecuteOptions {
       body: string;
       version: number;
     };
+    warnings: ValidationIssue[];
   }>;
   /** Updates a skill body and derived metadata from a tool-authored SKILL.md body. */
   updateSkill?: (params: {
@@ -178,6 +186,7 @@ export interface ToolExecuteOptions {
     | {
         status: 'updated';
         skill: { _id: Types.ObjectId; name: string; body: string; version: number };
+        warnings: ValidationIssue[];
       }
     | { status: 'conflict'; current: { _id: Types.ObjectId; name: string; version: number } }
     | { status: 'not_found' }
@@ -340,6 +349,10 @@ const MAX_AUTHORING_BYTES = 10 * 1024 * 1024;
 const MAX_TOOL_ERROR_MESSAGE_CHARS = 12_000;
 const MAX_TOOL_ERROR_STACK_CHARS = 4_000;
 const SKILL_MD = 'SKILL.md';
+const MAX_SKILL_AUTHORING_WARNINGS = 20;
+const MAX_SKILL_WARNING_FIELD_CHARS = 120;
+const MAX_SKILL_WARNING_CODE_CHARS = 64;
+const MAX_SKILL_WARNING_MESSAGE_CHARS = 300;
 
 const IMAGE_MIMES = new Set(['image/png', 'image/jpeg', 'image/gif', 'image/webp']);
 
@@ -605,6 +618,34 @@ function successResult(
   return result;
 }
 
+function surfaceSkillAuthoringWarnings(warnings: ValidationIssue[] | undefined): {
+  contentSuffix: string;
+  warnings: Array<ValidationIssue & { severity: 'warning' }>;
+  warningCount: number;
+} | null {
+  if (!warnings?.length) {
+    return null;
+  }
+  const surfaced = warnings.slice(0, MAX_SKILL_AUTHORING_WARNINGS).map((warning) => ({
+    field: truncateMiddle(warning.field, MAX_SKILL_WARNING_FIELD_CHARS),
+    code: truncateMiddle(warning.code, MAX_SKILL_WARNING_CODE_CHARS),
+    message: truncateMiddle(warning.message, MAX_SKILL_WARNING_MESSAGE_CHARS),
+    severity: 'warning' as const,
+  }));
+  const omitted = warnings.length - surfaced.length;
+  const lines = surfaced.map(
+    (warning) => `- ${warning.field} [${warning.code}]: ${warning.message}`,
+  );
+  if (omitted > 0) {
+    lines.push(`- ${omitted} additional warning(s) omitted.`);
+  }
+  return {
+    contentSuffix: `\n\nWarnings:\n${lines.join('\n')}`,
+    warnings: surfaced,
+    warningCount: warnings.length,
+  };
+}
+
 function guessMimeType(filename: string): string {
   return MIME_MAP[lowercaseExtension(filename)] ?? 'application/octet-stream';
 }
@@ -807,7 +848,11 @@ function parseStructuredSkillFrontmatter(
     if (typeof parsed !== 'object' || Array.isArray(parsed)) {
       return { error: `${SKILL_MD} frontmatter must be a YAML mapping.` };
     }
-    return { frontmatter: parsed as Record<string, unknown> };
+    const normalized = normalizeSkillFrontmatterKeys(parsed as Record<string, unknown>);
+    if ('error' in normalized) {
+      return { error: `Invalid ${SKILL_MD} frontmatter: ${normalized.error}` };
+    }
+    return { frontmatter: normalized.frontmatter };
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     return { error: `Invalid ${SKILL_MD} frontmatter: ${message}` };
@@ -1166,6 +1211,7 @@ const BINARY_EXTENSIONS_NEVER_READABLE = new Set([
   '.xlsx',
   '.ppt',
   '.pptx',
+  '.potx',
   '.odt',
   '.ods',
   '.odp',
@@ -2030,6 +2076,37 @@ function toolDeclaresRunInBackgroundParam(tool: StructuredToolInterface): boolea
   );
 }
 
+/**
+ * True when the tool's own schema declares `intent` (zod shape or raw JSON
+ * schema) — SDK-native intent tools do, so they receive the argument
+ * untouched and handle it themselves; host-injected tools do not, so the
+ * arg is stripped before invocation.
+ */
+function toolDeclaresIntentParam(tool: StructuredToolInterface): boolean {
+  const schema = (
+    tool as StructuredToolInterface & {
+      schema?: { shape?: Record<string, unknown>; properties?: Record<string, unknown> };
+    }
+  ).schema;
+  if (schema == null) {
+    return false;
+  }
+  return schema.shape?.[INTENT_ARG] != null || schema.properties?.[INTENT_ARG] != null;
+}
+
+/**
+ * Strips the host-injected `intent` label from invoke args unless the tool's
+ * own schema declares it. The label rides `tool_call.args` to the client
+ * untouched — only the tool body must never see an undeclared parameter
+ * (strict MCP/action schemas would reject it; zod tools would strip-or-throw).
+ */
+function stripIntentForInvoke(args: unknown, tool: StructuredToolInterface): unknown {
+  if (!hasIntentArg(args) || toolDeclaresIntentParam(tool)) {
+    return args;
+  }
+  return stripIntentArg(args);
+}
+
 function mergeToolConfigurables(
   base: Record<string, unknown> | undefined,
   loaded: Record<string, unknown> | undefined,
@@ -2373,13 +2450,20 @@ async function writeSkillMd({
       throw error;
     }
     rememberAuthoredSkill([mergedConfigurable, sourceConfigurable], result.skill);
+    const surfacedWarnings = surfaceSkillAuthoringWarnings(result.warnings);
     return successResult(
       tc,
-      `Created ${SKILL_FILE_PREFIX}${skillName}/${SKILL_MD} (${content.length} chars).`,
+      `Created ${SKILL_FILE_PREFIX}${skillName}/${SKILL_MD} (${content.length} chars).${surfacedWarnings?.contentSuffix ?? ''}`,
       {
         path: `${SKILL_FILE_PREFIX}${skillName}/${SKILL_MD}`,
         bytes_written: Buffer.byteLength(content, 'utf8'),
         created: true,
+        ...(surfacedWarnings
+          ? {
+              warnings: surfacedWarnings.warnings,
+              warning_count: surfacedWarnings.warningCount,
+            }
+          : {}),
       },
     );
   }
@@ -2418,11 +2502,19 @@ async function writeSkillMd({
     content,
   );
   const summary = `Updated ${SKILL_FILE_PREFIX}${skillName}/${SKILL_MD} (${content.length} chars).`;
-  return successResult(tc, diff ? `${summary}\n\n${diff}` : summary, {
+  const surfacedWarnings = surfaceSkillAuthoringWarnings(result.warnings);
+  const summaryWithWarnings = `${summary}${surfacedWarnings?.contentSuffix ?? ''}`;
+  return successResult(tc, diff ? `${summaryWithWarnings}\n\n${diff}` : summaryWithWarnings, {
     path: `${SKILL_FILE_PREFIX}${skillName}/${SKILL_MD}`,
     bytes_written: Buffer.byteLength(content, 'utf8'),
     created: false,
     ...(diff ? { diff } : {}),
+    ...(surfacedWarnings
+      ? {
+          warnings: surfacedWarnings.warnings,
+          warning_count: surfacedWarnings.warningCount,
+        }
+      : {}),
   });
 }
 
@@ -3382,7 +3474,7 @@ async function handleSkillToolCall(
 
   const injectedMessages: InjectedMessage[] = [buildSkillPrimeMessage({ name: skill.name, body })];
 
-  const contentText = `Skill "${args.skillName}" loaded. Follow the instructions below.`;
+  let contentText = `Skill "${args.skillName}" loaded. Follow the instructions below.`;
   let artifact:
     | {
         session_id: string;
@@ -3411,9 +3503,10 @@ async function handleSkillToolCall(
     getStrategyFunctions &&
     batchUploadCodeEnvFiles
   ) {
+    let primeResult: PrimeSkillFilesResult | null = null;
     try {
       const skillFiles = await listSkillFiles(skill._id);
-      const primeResult = await primeSkillFiles({
+      primeResult = await primeSkillFiles({
         skill,
         skillFiles,
         req,
@@ -3450,6 +3543,15 @@ async function handleSkillToolCall(
         `[handleSkillToolCall] Failed to prime files for skill "${args.skillName}":`,
         error instanceof Error ? error.message : error,
       );
+    }
+    if (!primeResult) {
+      /* Degrade loudly: without this note the model follows skill
+       * instructions referencing sandbox paths that were never mounted
+       * and burns turns on missing-path errors. */
+      contentText +=
+        `\n\nNote: this skill's bundled files could not be loaded into the code environment ` +
+        `(upload failed or was rate-limited). Paths under /mnt/data/${SKILL_FILE_PREFIX}${skill.name}/ ` +
+        `are NOT available to bash or code execution this turn. Use the read_file tool to view bundled files instead.`;
     }
   }
 
@@ -3721,7 +3823,7 @@ export function createToolExecuteHandler(options: ToolExecuteOptions): EventHand
               }
               const { task, isNew } = created;
               if (isNew) {
-                const strippedArgs = stripRunInBackgroundArg(tc.args);
+                const strippedArgs = stripIntentForInvoke(stripRunInBackgroundArg(tc.args), tool);
                 /** Persists the settled result onto the dispatch turn's message
                  *  (patch the tool-call part's output, persist generated files,
                  *  append attachments), so a backgrounded code call reads like a
@@ -4180,10 +4282,16 @@ export function createToolExecuteHandler(options: ToolExecuteOptions): EventHand
                         /* PTC-generated calls don't go through the host background
                          * interceptor, so strip the injected `run_in_background`
                          * param from target schemas (the registry entries were
-                         * mutated to include it) — mirrors the self-spawn path. */
-                        const toolDefs = stripBackgroundFromToolDefinitions(
-                          filteredToolDefs,
-                          mergedConfigurable?.backgroundToolNames as string[] | undefined,
+                         * mutated to include it) — mirrors the self-spawn path.
+                         * Intent LABELS are stripped for the same reason —
+                         * host-injected AND SDK-native alike (marker-guarded):
+                         * no card renders for an inner call, so the sandbox
+                         * bridge must not advertise them. */
+                        const toolDefs = stripIntentLabelsFromToolDefinitions(
+                          stripBackgroundFromToolDefinitions(
+                            filteredToolDefs,
+                            mergedConfigurable?.backgroundToolNames as string[] | undefined,
+                          ),
                         );
                         toolCallConfig.toolDefs = toolDefs;
                         toolCallConfig.toolMap = ptcToolMap ?? toolMap;
@@ -4202,7 +4310,7 @@ export function createToolExecuteHandler(options: ToolExecuteOptions): EventHand
                         ? stripRunInBackgroundArg(tc.args)
                         : tc.args;
                     const result = await tool.invoke(
-                      normalizeToolInvokeArgs(foregroundArgs, tool),
+                      normalizeToolInvokeArgs(stripIntentForInvoke(foregroundArgs, tool), tool),
                       {
                         toolCall: toolCallConfig,
                         configurable: mergedConfigurable,

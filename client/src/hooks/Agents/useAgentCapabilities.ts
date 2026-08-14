@@ -16,6 +16,7 @@ interface AgentCapabilitiesResult {
   deferredToolsEnabled: boolean;
   programmaticToolsEnabled: boolean;
   backgroundToolsEnabled: boolean;
+  toolIntentsEnabled: boolean;
 }
 
 export default function useAgentCapabilities(
@@ -91,6 +92,11 @@ export default function useAgentCapabilities(
     [capabilities],
   );
 
+  const toolIntentsEnabled = useMemo(
+    () => capabilities?.includes(AgentCapabilities.tool_intents) ?? false,
+    [capabilities],
+  );
+
   return {
     ocrEnabled,
     codeEnabled,
@@ -106,5 +112,6 @@ export default function useAgentCapabilities(
     deferredToolsEnabled,
     programmaticToolsEnabled,
     backgroundToolsEnabled,
+    toolIntentsEnabled,
   };
 }
