@@ -76,8 +76,6 @@ describe('ConnectionsRepository', () => {
       disconnect: jest.fn().mockResolvedValue(undefined),
       createdAt: Date.now(),
       isStale: jest.fn().mockReturnValue(false),
-      /* A real connection is an EventEmitter and the repository subscribes to it. */
-      on: jest.fn(),
     } as unknown as jest.Mocked<MCPConnection>;
 
     (MCPConnectionFactory.create as jest.Mock).mockResolvedValue(mockConnection);
