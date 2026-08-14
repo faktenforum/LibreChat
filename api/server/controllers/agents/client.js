@@ -1353,9 +1353,6 @@ class AgentClient extends BaseClient {
       );
     }
 
-    // Image content in messages is filtered by the LLM layer (_convertMessagesToOpenAIParams)
-    // when agent.vision is false; no need to strip image_urls here.
-
     /** @type {Record<number, number>} */
     const indexTokenCountMap = {};
     /** @type {Record<string, number>} */

@@ -299,7 +299,6 @@ export function getReasoningKey(
   ) {
     reasoningKey = 'reasoning';
   }
-
   return reasoningKey;
 }
 
@@ -1564,9 +1563,9 @@ export async function createRun({
     /**
      * Vision capability is propagated on the agent input so the agents run
      * (and downstream image handling) treats non-vision Scaleway/OpenRouter
-     * models correctly, preventing "model is not multimodal" errors. The
-     * field is set structurally because upstream's `AgentInputs` no longer
-     * declares `vision` (the modelSpec/vision change was not adopted upstream).
+     * models correctly, preventing "model is not multimodal" errors. Set
+     * structurally: `AgentInputs` is typed from the published upstream package,
+     * while our fork of `@librechat/agents` is only overlaid at runtime.
      */
     (agentInput as AgentInputs & { vision?: boolean }).vision = visionCapability;
 

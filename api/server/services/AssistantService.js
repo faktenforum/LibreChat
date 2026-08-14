@@ -437,7 +437,6 @@ async function runAssistant({
   });
 
   const tool_outputs = await processRequiredActions(openai, actions);
-
   const toolRun = await openai.beta.threads.runs.submitToolOutputs(run.id, {
     thread_id: run.thread_id,
     tool_outputs,

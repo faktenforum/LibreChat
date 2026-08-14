@@ -288,12 +288,10 @@ async function processRequiredActions(client, requiredActions) {
     let tool = ToolMap[currentAction.tool] ?? ActionToolMap[currentAction.tool];
 
     const handleToolOutput = async (output) => {
-      // For MCP tools, output is [content, artifact] array
-      // Store the full array in requiredActions[i].output for artifact processing
-      // For tool output to OpenAI, we'll extract just the content
       requiredActions[i].output = output;
 
-      // Extract content for tool call display (first element of array if array, otherwise output itself)
+      /** An MCP tool returns `[content, artifact]`; only the content goes back to the model,
+       * the full tuple stays on `requiredActions[i]` for artifact processing. */
       const outputContent = Array.isArray(output) && output.length >= 1 ? output[0] : output;
 
       /** @type {FunctionToolCall & PartMetadata} */
@@ -357,13 +355,9 @@ async function processRequiredActions(client, requiredActions) {
         // result: tool.result,
       });
 
-      // For MCP tools with artifacts, return the content string for OpenAI tool output
-      // The full array [content, artifact] is stored in requiredActions[i].output for artifact processing
-      const finalOutput = outputContent;
-
       return {
         tool_call_id: currentAction.toolCallId,
-        output: finalOutput,
+        output: outputContent,
       };
     };
 
@@ -506,10 +500,8 @@ async function processRequiredActions(client, requiredActions) {
     }
   }
 
-  const tool_outputs = await Promise.all(promises);
-
   return {
-    tool_outputs,
+    tool_outputs: await Promise.all(promises),
   };
 }
 

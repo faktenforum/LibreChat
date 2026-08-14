@@ -1087,9 +1087,6 @@ function createToolInstance({
       const customUserVars =
         config?.configurable?.userMCPAuthMap?.[`${Constants.mcp_prefix}${serverName}`];
 
-      // mcpManager.callTool returns FormattedContentResult: [content, artifacts]
-      // This tuple format is already handled by formatToolContent in @librechat/api
-      // and is compatible with responseFormat: CONTENT_AND_ARTIFACT
       const result = await mcpManager.callTool({
         serverName,
         serverConfig: capturedServerConfig,
