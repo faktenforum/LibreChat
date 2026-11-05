@@ -27,6 +27,8 @@ jest.mock('~/hooks', () => ({
   useAgentToolPermissions: jest.fn(),
   useAgentCapabilities: jest.fn(),
   useGetAgentsConfig: jest.fn(),
+  /* The vision gate reads chat context, which these cases do not mount. */
+  useVisionModel: jest.fn(() => true),
 }));
 
 jest.mock('~/hooks/AuthContext', () => {

@@ -333,6 +333,12 @@ const RUNTIME_READERS: Readonly<Record<string, RuntimeReader>> = {
   'webSearch.cohereApiKey': webSearchReader('cohereApiKey', {
     rerankerType: RerankerTypes.COHERE,
   }),
+  /** The custom reranker's URL and model are required, so the key alone does not authenticate. */
+  'webSearch.customRerankerApiKey': webSearchReader('customRerankerApiKey', {
+    rerankerType: RerankerTypes.CUSTOM,
+    customRerankerApiUrl: 'https://reranker.example.com/v1/rerank',
+    customRerankerModel: 'runtime-reader-reranker',
+  }),
   'endpoints.azureOpenAI.groups[].apiKey': azureGroupsReader,
   'endpoints.custom[].apiKey': {
     module: 'packages/api/src/app/config.ts',

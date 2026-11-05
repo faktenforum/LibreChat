@@ -2598,6 +2598,9 @@
           "recursion_limit": {
             "type": "number"
           },
+          "vision": {
+            "type": "boolean"
+          },
           "conversation_starters": {
             "type": "array",
             "items": {
@@ -3073,6 +3076,9 @@
           },
           "recursion_limit": {
             "type": "number"
+          },
+          "vision": {
+            "type": "boolean"
           },
           "conversation_starters": {
             "type": "array",
@@ -3573,6 +3579,9 @@
           },
           "recursion_limit": {
             "type": "number"
+          },
+          "vision": {
+            "type": "boolean"
           },
           "conversation_starters": {
             "type": "array",

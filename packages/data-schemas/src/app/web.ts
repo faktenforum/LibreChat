@@ -101,6 +101,7 @@ export const webSearchUrlApiKeys: ReadonlyMap<TWebSearchKeys, TWebSearchKeys> = 
   ['tavilySearchUrl', 'tavilyApiKey'],
   ['tavilyExtractUrl', 'tavilyApiKey'],
   ['keenableApiUrl', 'keenableApiKey'],
+  ['customRerankerApiUrl', 'customRerankerApiKey'],
 ]);
 
 /** Every web search URL that receives an API key, and every key sent to one. */

@@ -18,6 +18,10 @@ let mockAgentId: string | undefined = 'agent_saved01';
 jest.mock('~/Providers', () => ({
   useDragDropContext: () => mockDragDropContext,
 }));
+/* The vision gate reads chat context, which this spec's `~/Providers` mock does not carry. */
+jest.mock('~/hooks/useVisionModel', () => ({
+  useVisionModel: () => true,
+}));
 jest.mock('~/hooks/Agents/useGetAgentsConfig', () => ({
   __esModule: true,
   default: () => ({ agentsConfig: {} }),

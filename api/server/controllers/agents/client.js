@@ -2144,8 +2144,9 @@ class AgentClient extends BaseClient {
     }
 
     // Determine vision capability: explicit agent.vision takes precedence,
-    // otherwise check if the model supports vision
-    let isVisionCapable = false;
+    // otherwise check if the model supports vision. An agent that declares
+    // neither is left to the encoder rather than losing its images here.
+    let isVisionCapable = true;
     if (agent.vision !== undefined) {
       isVisionCapable = agent.vision === true;
     } else {
