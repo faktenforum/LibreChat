@@ -30,6 +30,8 @@ export interface IAgent extends Omit<Document, 'model'> {
   artifacts?: string;
   access_level?: number;
   recursion_limit?: number;
+  /** Explicit vision override; unset means derive it from the model. */
+  vision?: boolean;
   tools?: string[];
   skills?: string[];
   skills_enabled?: boolean;

@@ -575,6 +575,23 @@ describe('Agent Methods', () => {
       expect(retrievedAgent!.instructionsPrompt).toEqual(instructionsPrompt);
     });
 
+    test('should persist the vision override on create and update', async () => {
+      const { agentId, authorId } = createTestIds();
+
+      await createAgent({
+        id: agentId,
+        name: 'Vision Agent',
+        provider: 'test',
+        model: 'test-model',
+        author: authorId,
+        vision: true,
+      });
+      expect((await getAgent({ id: agentId }))!.vision).toBe(true);
+
+      await updateAgent({ id: agentId }, { vision: false });
+      expect((await getAgent({ id: agentId }))!.vision).toBe(false);
+    });
+
     test('should derive mcpServerNames only from MCP tools on create', async () => {
       const { agentId, authorId } = createTestIds();
       const actionTool = `sync${Constants.mcp_delimiter}state${actionDelimiter}api---example---com`;

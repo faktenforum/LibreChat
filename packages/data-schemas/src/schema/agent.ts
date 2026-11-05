@@ -41,6 +41,9 @@ const agentSchema: Schema<IAgent> = new Schema<IAgent>(
     recursion_limit: {
       type: Number,
     },
+    vision: {
+      type: Boolean,
+    },
     tools: {
       type: [String],
       default: undefined,
