@@ -6,8 +6,15 @@ const {
   applyAxiosProxyConfig,
   resolveConfigSecret,
   applySSRFSafeAgentIfDirect,
+  pipeSegment,
+  pipeToResponse,
+  capSpeechInput,
 } = require('@librechat/api');
-const { extractEnvVariable, TTSProviders } = require('librechat-data-provider');
+const {
+  TTSProviders,
+  extractEnvVariable,
+  listConfiguredSpeechProviders,
+} = require('librechat-data-provider');
 const { getRandomVoiceId, createChunkProcessor, splitTextIntoChunks } = require('./streamAudio');
 const { getAppConfig } = require('~/server/services/Config');
 
@@ -52,9 +59,7 @@ class TTSService {
         'No TTS schema is set. Did you configure TTS in the custom config (librechat.yaml)?',
       );
     }
-    const providers = Object.entries(ttsSchema).filter(
-      ([key, value]) => key !== 'allowedAddresses' && Object.keys(value).length > 0,
-    );
+    const providers = listConfiguredSpeechProviders(ttsSchema);
 
     if (providers.length !== 1) {
       throw new Error(
@@ -293,10 +298,6 @@ class TTSService {
   async processTextToSpeech(req, res) {
     const { input, voice: requestVoice } = req.body;
 
-    if (!input) {
-      return res.status(400).send('Missing text in request body');
-    }
-
     const appConfig =
       req.config ??
       (await getAppConfig({
@@ -304,6 +305,10 @@ class TTSService {
         userId: req.user?.id,
         tenantId: req.user?.tenantId,
       }));
+    const text = capSpeechInput(input, appConfig?.speech?.tts);
+    if (!text) {
+      return res.status(400).send('Missing text in request body');
+    }
     try {
       res.setHeader('Content-Type', 'audio/mpeg');
       const provider = this.getProvider(appConfig);
@@ -311,18 +316,20 @@ class TTSService {
       const allowedAddresses = appConfig?.speech?.tts?.allowedAddresses;
       const voice = await this.getVoice(ttsSchema, requestVoice);
 
-      if (input.length < 4096) {
+      if (text.length < 4096) {
         const response = await this.ttsRequest(
           provider,
           ttsSchema,
-          { input, voice },
+          { input: text, voice },
           allowedAddresses,
         );
-        response.data.pipe(res);
+        pipeToResponse(response.data, res, (error) =>
+          logAxiosError({ message: '[TTS] Audio stream failed:', error }),
+        );
         return;
       }
 
-      const textChunks = splitTextIntoChunks(input, 1000);
+      const textChunks = splitTextIntoChunks(text, 1000);
 
       for (const chunk of textChunks) {
         try {
@@ -338,10 +345,7 @@ class TTSService {
           );
 
           logger.debug(`[textToSpeech] user: ${req?.user?.id} | writing audio stream`);
-          await new Promise((resolve) => {
-            response.data.pipe(res, { end: chunk.isFinished });
-            response.data.on('end', resolve);
-          });
+          await pipeSegment(response.data, res, { end: chunk.isFinished });
 
           if (chunk.isFinished) {
             break;
@@ -397,7 +401,11 @@ class TTSService {
       shouldContinue = false;
     });
 
-    const processChunks = createChunkProcessor(req.user.id, req.body.messageId);
+    const processChunks = createChunkProcessor(
+      req.user.id,
+      req.body.messageId,
+      appConfig?.speech?.tts?.maxInputChars,
+    );
 
     try {
       while (shouldContinue) {
@@ -430,10 +438,7 @@ class TTSService {
             }
 
             logger.debug(`[streamAudio] user: ${req?.user?.id} | writing audio stream`);
-            await new Promise((resolve) => {
-              response.data.pipe(res, { end: update.isFinished });
-              response.data.on('end', resolve);
-            });
+            await pipeSegment(response.data, res, { end: update.isFinished });
 
             if (update.isFinished) {
               shouldContinue = false;

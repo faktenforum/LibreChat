@@ -1,11 +1,13 @@
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
+import { logger } from '@librechat/data-schemas';
 import { HookRegistry, executeHooks } from '@librechat/agents';
 import {
   getDeploymentPluginHookCapabilities,
   registerDeploymentPluginHooks,
   hasDeploymentPluginHooks,
+  hasDeploymentPluginToolApprovalHooks,
 } from './runtime';
 import { getPluginHookSource, setPluginHookSource } from '~/agents/hooks';
 import { initializeDeploymentPlugins } from './deployment';
@@ -97,6 +99,26 @@ afterEach(async () => {
 });
 
 describe('getDeploymentPluginHookCapabilities', () => {
+  it('logs a startup error for a missing shell but keeps guards executable', () => {
+    const error = jest.spyOn(logger, 'error');
+    const capabilities = getDeploymentPluginHookCapabilities({
+      DEPLOYMENT_PLUGIN_HOOKS: 'true',
+      PATH: dataDir,
+    });
+    expect(capabilities?.handlerTypes.has('command')).toBe(true);
+    expect(error).toHaveBeenCalledWith(
+      expect.stringMatching(/DEPLOYMENT_PLUGIN_HOOKS is enabled:.*could not start/),
+    );
+  });
+
+  it('does not report a missing shell when hooks are disabled', () => {
+    const error = jest.spyOn(logger, 'error');
+    expect(
+      getDeploymentPluginHookCapabilities({ DEPLOYMENT_PLUGIN_HOOKS: 'false', PATH: dataDir }),
+    ).toBeUndefined();
+    expect(error).not.toHaveBeenCalled();
+  });
+
   it('returns undefined unless DEPLOYMENT_PLUGIN_HOOKS is enabled', () => {
     expect(getDeploymentPluginHookCapabilities({})).toBeUndefined();
     expect(
@@ -159,6 +181,29 @@ describe('registerDeploymentPluginHooks', () => {
       },
     });
     expect(unmatched.decision).toBeUndefined();
+  });
+
+  it('denies through the hook registry when the command shell cannot spawn', async () => {
+    await writePlugin('guard');
+    await initialize();
+    const registry = new HookRegistry();
+    registerDeploymentPluginHooks({ registry, context: { sessionId: 'missing-shell' } });
+    jest.replaceProperty(process.env, 'PATH', dataDir);
+
+    const result = await executeHooks({
+      registry,
+      matchQuery: 'write_file',
+      input: {
+        hook_event_name: 'PreToolUse',
+        runId: 'run-1',
+        toolName: 'write_file',
+        toolInput: { path: '/etc/passwd' },
+        toolUseId: 'tool-1',
+      },
+    });
+    expect(result).toEqual(
+      expect.objectContaining({ decision: 'deny', reason: 'Plugin hook command could not start' }),
+    );
   });
 
   it('fires Claude-alias matchers against runtime tool names with plugin-namespace payloads', async () => {
@@ -306,6 +351,9 @@ describe('registerDeploymentPluginHooks', () => {
     });
     const source = getPluginHookSource();
     expect(source?.hasHooks()).toBe(true);
+    expect(hasDeploymentPluginToolApprovalHooks()).toBe(true);
+    expect(hasDeploymentPluginToolApprovalHooks(['unmatched_tool'])).toBe(false);
+    expect(hasDeploymentPluginToolApprovalHooks(['write_file'])).toBe(true);
     const registry = new HookRegistry();
     expect(source?.register({ registry, context: { sessionId: 'conversation-seam' } })).toBe(4);
     setPluginHookSource(undefined);

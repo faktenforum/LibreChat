@@ -4,10 +4,14 @@ import {
   normalizeServerName,
   buildServerNameAliases,
 } from 'librechat-data-provider';
-import type { Action } from 'librechat-data-provider';
+import type { Action, AgentSubagentsConfig, GraphEdge } from 'librechat-data-provider';
 import type { AgentItem, AgentItemKind } from './types';
+import { isFileBackedCapabilityEnabled } from './capabilities';
+import { isHandoffEdge } from './orchestration';
 
 export interface FormSelection {
+  subagents?: AgentSubagentsConfig;
+  edges?: GraphEdge[];
   execute_code: boolean;
   web_search: boolean;
   file_search: boolean;
@@ -37,12 +41,14 @@ export function itemKey(item: Pick<AgentItem, 'kind' | 'id'>): string {
 function isBuiltinSelected(item: AgentItem, form: FormSelection): boolean {
   if (item.kind !== 'builtin') return false;
   switch (item.id) {
+    /** File-backed built-ins share their on/off rule with removal and persistence
+     *  (see `capabilities.ts`), so the three cannot drift apart again. */
     case 'execute_code':
-      return form.execute_code || form.code_files.length > 0;
+      return isFileBackedCapabilityEnabled(form.execute_code, form.code_files.length);
     case 'web_search':
       return form.web_search;
     case 'file_search':
-      return form.file_search || form.knowledge_files.length > 0;
+      return isFileBackedCapabilityEnabled(form.file_search, form.knowledge_files.length);
     case 'memory':
       return form.memory;
     case 'vision':
@@ -51,6 +57,10 @@ function isBuiltinSelected(item: AgentItem, form: FormSelection): boolean {
       return Boolean(form.artifacts);
     case 'context':
       return form.context_files.length > 0;
+    case 'subagents':
+      return form.subagents?.enabled === true;
+    case 'handoffs':
+      return form.edges?.some(isHandoffEdge) === true;
     case 'ask_user_question':
       // Native tool presented as a builtin — selection lives in agent.tools.
       return form.tools.includes('ask_user_question');
@@ -78,9 +88,8 @@ export function mcpServerToken(serverName: string): string {
  * Server-wide wildcard token (`sys__all__sys_mcp_<serverName>`). Unlike the
  * UI-only `mcp_server` placeholder (skipped at runtime), `mcp_all` is resolved
  * by the backend into ALL of the server's tools at chat-turn time. Used for
- * request-scoped servers (runtime `{{LIBRECHAT_BODY_*}}` placeholders) whose
- * tools cannot be enumerated outside a chat turn, so per-tool selection is
- * impossible and the server must be attached as a whole.
+ * ready servers whose catalog is unavailable without user credentials or chat
+ * fields. Per-tool selection is unavailable, so the server attaches as a whole.
  */
 export function mcpAllToken(serverName: string): string {
   return `${Constants.mcp_all}${Constants.mcp_delimiter}${serverName}`;
