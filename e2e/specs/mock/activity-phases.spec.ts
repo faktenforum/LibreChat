@@ -84,13 +84,15 @@ async function getLabelRequestsFor(
 }
 
 async function selectEphemeralMCP(page: Page) {
-  await page.getByRole('button', { name: 'MCP Servers', exact: true }).click();
-  const serverItem = page.getByRole('menuitemcheckbox', { name: new RegExp(MCP_SERVER_TITLE) });
+  await page.getByRole('button', { name: 'Attach and tools' }).click();
+  const serverItem = page
+    .getByRole('dialog', { name: 'Attach and tools' })
+    .getByRole('button', { name: new RegExp(`^${MCP_SERVER_TITLE}\\b`) });
   await expect(serverItem).toBeVisible();
   await serverItem.click();
-  await expect(serverItem).toHaveAttribute('aria-checked', 'true');
+  await expect(serverItem).toHaveAttribute('aria-pressed', 'true');
   await page.keyboard.press('Escape');
-  await expect(page.getByRole('button', { name: new RegExp(MCP_SERVER_TITLE) })).toBeVisible();
+  await expect(page.getByRole('listitem', { name: MCP_SERVER_TITLE, exact: true })).toBeVisible();
 }
 
 function contentPartText(part: PersistedContentPart | null): string {
@@ -214,7 +216,7 @@ test.describe('parent activity phases', () => {
     const finalTextIndex = content.findIndex((part) => contentPartText(part).includes(finalText));
     expect(finalTextIndex).toBe(phasePart?.activity_end_index);
 
-    const parent = messagesView(page).locator(`summary[aria-label="${PARENT_LABEL}"]`);
+    const parent = messagesView(page).getByRole('button', { name: PARENT_LABEL, exact: true });
     await expect(parent).toBeVisible({ timeout: 30000 });
     await expect(messagesView(page).getByText(finalText)).toBeVisible({ timeout: 30000 });
     await parent.click();
@@ -241,7 +243,10 @@ test.describe('parent activity phases', () => {
     ).toBe(true);
 
     await page.reload();
-    const reloadedParent = messagesView(page).locator(`summary[aria-label="${PARENT_LABEL}"]`);
+    const reloadedParent = messagesView(page).getByRole('button', {
+      name: PARENT_LABEL,
+      exact: true,
+    });
     await expect(reloadedParent).toBeVisible({ timeout: 30000 });
     await expect(messagesView(page).getByText(finalText)).toBeVisible();
     await reloadedParent.click();

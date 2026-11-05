@@ -3,6 +3,7 @@ import { ChevronRight } from 'lucide-react';
 import { useSearchParams } from 'react-router-dom';
 import type { TSkillSummary } from 'librechat-data-provider';
 import SkillListItem from './SkillListItem';
+import { Collapse } from '~/components/ui';
 import { useLocalize } from '~/hooks';
 import { cn } from '~/utils';
 
@@ -37,20 +38,20 @@ export default function SkillList({
         >
           <ChevronRight
             className={cn(
-              'size-3 shrink-0 text-text-secondary transition-transform duration-200',
-              sectionOpen && 'rotate-90',
+              'text-text-secondary size-3 shrink-0 transition-transform duration-200',
+              sectionOpen ? 'rotate-90' : 'rtl:rotate-180',
             )}
             aria-hidden="true"
           />
-          <span className="text-xs text-text-secondary">{localize('com_ui_my_skills')}</span>
+          <span className="text-text-secondary text-xs">{localize('com_ui_my_skills')}</span>
         </button>
       </div>
 
       {/* Skill items */}
-      {sectionOpen && (
+      <Collapse open={sectionOpen}>
         <div className="flex flex-col gap-px">
           {skills.length === 0 ? (
-            <p className="px-3 py-4 text-center text-xs text-text-secondary">
+            <p className="text-text-secondary px-3 py-4 text-center text-xs">
               {localize('com_ui_skills_empty')}
             </p>
           ) : (
@@ -66,7 +67,7 @@ export default function SkillList({
             ))
           )}
         </div>
-      )}
+      </Collapse>
     </div>
   );
 }

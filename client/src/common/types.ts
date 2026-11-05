@@ -1,11 +1,11 @@
 import { RefObject } from 'react';
-import { FileSources, EModelEndpoint, isEphemeralAgentId } from 'librechat-data-provider';
+import { isEphemeralAgentId } from 'librechat-data-provider';
+import type { PaneOptionSettings } from '@librechat/chat/react';
 import type { UseMutationResult } from '@tanstack/react-query';
-import type * as InputNumberPrimitive from 'rc-input-number';
-import type { SetterOrUpdater, RecoilState } from 'recoil';
-import type { ColumnDef } from '@tanstack/react-table';
+import type { ExtendedFile } from '@librechat/chat';
 import type * as t from 'librechat-data-provider';
 import type { LucideIcon } from 'lucide-react';
+import type { SetterOrUpdater } from 'recoil';
 import type { TranslationKeys } from '~/hooks';
 import { MCPServerDefinition } from '~/hooks/MCP/useMCPServerManager';
 
@@ -46,43 +46,12 @@ export enum TTSEndpoints {
   external = 'external',
 }
 
-export type AudioChunk = {
-  audio: string;
-  isFinal: boolean;
-  alignment: {
-    char_start_times_ms: number[];
-    chars_durations_ms: number[];
-    chars: string[];
-  };
-  normalizedAlignment: {
-    char_start_times_ms: number[];
-    chars_durations_ms: number[];
-    chars: string[];
-  };
-};
-
-export type BadgeItem = {
-  id: string;
-  icon: React.ComponentType<any>;
-  label: string;
-  atom: RecoilState<boolean>;
-  isAvailable: boolean;
-};
-
 export type AssistantListItem = {
   id: string;
   name: string;
   metadata: t.Assistant['metadata'];
   model: string;
 };
-
-export type AgentListItem = {
-  id: string;
-  name: string;
-  avatar: t.Agent['avatar'];
-};
-
-export type TPluginMap = Record<string, t.TPlugin>;
 
 export type GenericSetter<T> = (value: T | ((currentValue: T) => T)) => void;
 
@@ -98,34 +67,6 @@ export type ChatFormValues = { text: string };
 export const mainTextareaId = 'prompt-textarea';
 export const globalAudioId = 'global-audio';
 
-export enum IconContext {
-  landing = 'landing',
-  menuItem = 'menu-item',
-  nav = 'nav',
-  message = 'message',
-}
-
-export type IconMapProps = {
-  className?: string;
-  iconURL?: string;
-  context?: 'landing' | 'menu-item' | 'nav' | 'message';
-  endpoint?: string | null;
-  endpointType?: string;
-  assistantName?: string;
-  agentName?: string;
-  avatar?: string;
-  size?: number;
-};
-
-export type IconComponent = React.ComponentType<IconMapProps>;
-export type AgentIconComponent = React.ComponentType<AgentIconMapProps>;
-export type IconComponentTypes = IconComponent | AgentIconComponent;
-export type IconsRecord = {
-  [key in t.EModelEndpoint | 'unknown' | string]: IconComponentTypes | null | undefined;
-};
-
-export type AgentIconMapProps = IconMapProps & { agentName?: string };
-
 export type NavLink = {
   title: TranslationKeys;
   label?: string;
@@ -133,16 +74,9 @@ export type NavLink = {
   Component?: React.ComponentType;
   onClick?: (e?: React.MouseEvent) => void;
   variant?: 'default' | 'ghost';
+  disabled?: boolean;
   id: string;
 };
-
-export interface DataColumnMeta {
-  meta:
-    | {
-        size: number | string;
-      }
-    | undefined;
-}
 
 export enum Panel {
   advanced = 'advanced',
@@ -213,6 +147,8 @@ export interface MCPServerInfo {
   tools: t.AgentToolType[];
   isConfigured: boolean;
   isConnected: boolean;
+  /** True when the server can be attached to an agent, even if its transport is request-scoped. */
+  isReadyForAgent?: boolean;
   /** True when tools can only be discovered with live chat request fields. */
   requestScoped?: boolean;
   consumeOnly?: boolean;
@@ -248,10 +184,10 @@ export type AgentModelPanelProps = {
   agent_id?: string;
   providers: Option[];
   models: Record<string, string[] | undefined>;
+  modelsError: boolean;
+  modelsReady: boolean;
   setActivePanel: React.Dispatch<React.SetStateAction<Panel>>;
 };
-
-export type AugmentedColumnDef<TData, TValue> = ColumnDef<TData, TValue> & DataColumnMeta;
 
 export type TSetOption = t.TSetOption;
 
@@ -260,8 +196,6 @@ export type TSetExample = (
   type: string,
   newValue: number | string | boolean | null,
 ) => void;
-
-export type OnInputNumberChange = InputNumberPrimitive.InputNumberProps['onChange'];
 
 export const defaultDebouncedDelay = 450;
 
@@ -322,14 +256,6 @@ export type TSetOptionsPayload = {
   setOptions?: TSetOptions;
 };
 
-export type TPresetItemProps = {
-  preset: t.TPreset;
-  value: t.TPreset;
-  onSelect: (preset: t.TPreset) => void;
-  onChangePreset: (preset: t.TPreset) => void;
-  onDeletePreset: (preset: t.TPreset) => void;
-};
-
 export type TOnClick = (e: React.MouseEvent<HTMLButtonElement>) => void;
 
 export type TGenButtonProps = {
@@ -349,14 +275,23 @@ export type TAskProps = {
 export type TOptions = {
   editedMessageId?: string | null;
   editedContent?: t.TEditedContent;
-  editedText?: string | null;
   isRegenerate?: boolean;
   isContinued?: boolean;
   isEdited?: boolean;
+  /**
+   * Manual context compaction: a summarize-only turn hung off the branch's
+   * leaf (`messageId`). Shaped like a regenerate on the client — no new user
+   * bubble, the response placeholder parents onto the leaf — and sent with
+   * `compact: true` so the server runs the graph summarize-only.
+   */
+  compact?: boolean;
   overrideMessages?: t.TMessage[];
-  /** This value is only true when the user submits a message with "Update & rerun" for a user-created message */
-  isResubmission?: boolean;
-  /** Currently only utilized when `isResubmission === true`, uses that message's currently attached files */
+  /**
+   * Authoritative attachment list for this submission: a rerun replays the edited
+   * message's stored files, and an auto-drained queued message replays the ones taken
+   * out of the composer when it was queued. Authoritative even when empty, so a drain
+   * never vacuums up attachments the user staged for their next send.
+   */
   overrideFiles?: t.TMessage['files'];
   /**
    * Assistant message being regenerated. Used to derive the optimistic response
@@ -379,6 +314,8 @@ export type TOptions = {
    * context even though the references still show on the user bubble.
    */
   overrideQuotes?: string[];
+  /** Request-scoped reasoning selection for this exact submission. */
+  overrideReasoning?: t.TReasoningOverride | null;
   /** Added conversation for multi-convo feature - sent to server as part of submission payload */
   addedConvo?: t.TConversation;
   /** Reuse a durable submission identity (terminal steer recovery). */
@@ -408,9 +345,14 @@ export type TMessageChatContext = {
   index: number;
   regenerate: (message: t.TMessage, options?: { addedConvo?: t.TConversation | null }) => void;
   conversation: t.TConversation | null;
-  latestMessageId: string | undefined;
-  latestMessageDepth: number | undefined;
+  /** Getter backed by a ref, for reads at call time. Rendering reads the row's
+   *  `latestMessageId` prop, which its comparator gates on the row's relation. */
+  readonly latestMessageId: string | undefined;
+  /** Getter backed by a ref, for reads at call time (see `latestMessageId`). */
+  readonly latestMessageDepth: number | undefined;
   handleContinue: (e: React.MouseEvent<HTMLButtonElement>) => void;
+  /** Resolved once per chat from `interface.feedback`; false until the config loads */
+  feedbackEnabled: boolean;
   /** Should be a getter backed by a ref — reads current value without triggering re-renders */
   readonly isSubmitting: boolean;
 };
@@ -471,22 +413,6 @@ export type TConfigProps = {
   endpoint: t.EModelEndpoint | string;
 };
 
-export type TDangerButtonProps = {
-  id: string;
-  confirmClear: boolean;
-  className?: string;
-  disabled?: boolean;
-  showText?: boolean;
-  mutation?: UseMutationResult<unknown>;
-  onClick: () => void;
-  infoTextCode: TranslationKeys;
-  actionTextCode: TranslationKeys;
-  dataTestIdInitial: string;
-  dataTestIdConfirm: string;
-  infoDescriptionCode?: TranslationKeys;
-  confirmActionTextCode?: TranslationKeys;
-};
-
 export type TDialogProps = {
   open: boolean;
   onOpenChange: (open: boolean) => void;
@@ -498,7 +424,7 @@ export type ToolDialogProps = {
 };
 
 export type TResError = {
-  response: { data: { message: string } };
+  response: { data: { message: string; code?: string } };
   message: string;
 };
 
@@ -506,9 +432,11 @@ export type TAuthContext = {
   user: t.TUser | undefined;
   token: string | undefined;
   isAuthenticated: boolean;
+  isAuthReady: boolean;
   error: string | undefined;
   login: (data: t.TLoginUser) => void;
   logout: (redirect?: string) => void;
+  completeAuthentication: (token: string, user: t.TUser) => void;
   setError: React.Dispatch<React.SetStateAction<string | undefined>>;
   roles?: Record<string, t.TRole | null | undefined>;
 };
@@ -523,6 +451,7 @@ export type TUserContext = {
 export type TAuthConfig = {
   loginRedirect: string;
   test?: boolean;
+  optional?: boolean;
 };
 
 export type IconProps = Pick<t.TMessage, 'isCreatedByUser' | 'model'> &
@@ -535,6 +464,7 @@ export type IconProps = Pick<t.TMessage, 'isCreatedByUser' | 'model'> &
     iconClassName?: string;
     endpoint?: t.EModelEndpoint | string | null;
     endpointType?: t.EModelEndpoint | null;
+    endpointsConfig?: t.TEndpointsConfig | null;
     assistantName?: string;
     agentName?: string;
     error?: boolean;
@@ -580,45 +510,10 @@ export type PromptOption = MentionOption & {
   id: string;
 };
 
-export type TOptionSettings = {
-  showExamples?: boolean;
-  isCodeChat?: boolean;
-};
+export type TOptionSettings = PaneOptionSettings;
 
-export interface ExtendedFile {
-  file?: File;
-  file_id: string;
-  temp_file_id?: string;
-  type?: string;
-  filepath?: string;
-  filename?: string;
-  width?: number;
-  height?: number;
-  size: number;
-  preview?: string;
-  progress: number;
-  source?: FileSources;
-  attached?: boolean;
-  embedded?: boolean;
-  tool_resource?: string;
-  metadata?: t.TFile['metadata'];
-}
+export type { ExtendedFile };
 
-export interface ModelItemProps {
-  modelName: string;
-  endpoint: EModelEndpoint;
-  isSelected: boolean;
-  onSelect: () => void;
-  onNavigateBack: () => void;
-  icon?: JSX.Element;
-  className?: string;
-}
-
-export interface SwitcherProps {
-  endpoint?: t.EModelEndpoint | null;
-  endpointKeyProvided: boolean;
-  isCollapsed: boolean;
-}
 export type TLoginLayoutContext = {
   startupConfig: t.TStartupConfig | null;
   startupConfigError: unknown;
@@ -660,28 +555,21 @@ export type TFinalResData = Omit<TBaseResData, 'conversation'> & {
   responseMessage?: t.TMessage;
 };
 
-export type TVectorStore = {
-  _id: string;
-  object: 'vector_store';
-  created_at: string | Date;
-  name: string;
-  bytes?: number;
-  file_counts?: {
-    in_progress: number;
-    completed: number;
-    failed: number;
-    cancelled: number;
-    total: number;
-  };
-};
-
-export type TThread = { id: string; createdAt: string };
-
 declare global {
   interface Window {
     google_tag_manager?: unknown;
+    /** Google Tag Manager's command queue, present once the container has loaded. */
+    dataLayer?: unknown[];
+    /** Answers the server emits with the document, ahead of the app's own
+     *  scripts, for questions the first render must not guess at. */
     __LIBRECHAT_CONFIG__?: {
       enableQueryDevtools?: boolean;
+      /** Whether this deployment configured footer content of its own, so the
+       *  composer reserves the footer bar's band on its first frame. */
+      hasConfiguredFooter?: boolean;
+      /** The deployment's `interface.landingFooter`, so the welcome screen does
+       *  not paint a footer the config is about to remove. */
+      landingFooter?: boolean;
     };
   }
 }

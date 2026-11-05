@@ -1,5 +1,6 @@
 import { useCallback, useMemo } from 'react';
-import { atomFamily, useRecoilState, useResetRecoilState } from 'recoil';
+import { atom, useAtom } from 'jotai';
+import { atomFamily } from 'jotai/utils';
 import type { Agents } from 'librechat-data-provider';
 import {
   useAskSubmitStatus,
@@ -8,14 +9,28 @@ import {
 import { ASK_USER_DECLINED_ANSWER } from '~/utils/approval';
 
 interface AskQuestionsFormState {
+  /** Index of the question currently on screen. Lives beside the answers so the
+   *  composer popover and the chat card resume on the same step when one
+   *  surface hands over to the other. */
+  step: number;
   text: Record<string, string>;
   selected: Record<string, string[]>;
+  /** The batch's arrival already placed focus. Moving it between the composer
+   *  popover and the chat card remounts it, and that is not a new arrival. */
+  arrivalFocused: boolean;
 }
 
-const askQuestionsFormState = atomFamily<AskQuestionsFormState, string>({
-  key: 'askQuestionsFormState',
-  default: { text: {}, selected: {} },
-});
+const EMPTY_FORM: AskQuestionsFormState = {
+  step: 0,
+  text: {},
+  selected: {},
+  arrivalFocused: false,
+};
+
+/** Keyed by action id, so the composer popover and the chat card share one form. */
+const askQuestionsFormFamily = atomFamily((_actionId: string) =>
+  atom<AskQuestionsFormState>(EMPTY_FORM),
+);
 
 function ownValue<T>(record: Record<string, T>, key: string): T | undefined {
   return Object.hasOwn(record, key) ? record[key] : undefined;
@@ -25,8 +40,8 @@ export default function useAskQuestionsForm(
   actionId: string,
   questions: Agents.AskUserQuestionBatchItem[],
 ) {
-  const [state, setState] = useRecoilState(askQuestionsFormState(actionId));
-  const resetState = useResetRecoilState(askQuestionsFormState(actionId));
+  const [state, setState] = useAtom(askQuestionsFormFamily(actionId));
+  const resetState = useCallback(() => setState(EMPTY_FORM), [setState]);
   const { submitAskAnswer } = useResumeSubmit();
   const { getAskStatus } = useAskSubmitStatus();
   const status = getAskStatus(actionId);
@@ -35,9 +50,12 @@ export default function useAskQuestionsForm(
   const setText = useCallback(
     (question: Agents.AskUserQuestionBatchItem, value: string) => {
       setState((previous) => ({
+        ...previous,
         text: { ...previous.text, [question.id]: value },
+        /** A typed answer replaces the choices: the rows lock while the field
+         *  has text, so nothing stays selected behind them. */
         selected:
-          question.multiSelect === true || value.length === 0
+          value.trim().length === 0
             ? previous.selected
             : { ...previous.selected, [question.id]: [] },
       }));
@@ -56,12 +74,31 @@ export default function useAskQuestionsForm(
             : [...current, value];
         }
         return {
+          ...previous,
           text:
             question.multiSelect === true ? previous.text : { ...previous.text, [question.id]: '' },
           selected: { ...previous.selected, [question.id]: selected },
         };
       });
     },
+    [setState],
+  );
+
+  const goToStep = useCallback(
+    (index: number) => {
+      const bounded = Math.min(Math.max(index, 0), Math.max(questions.length - 1, 0));
+      setState((previous) =>
+        previous.step === bounded ? previous : { ...previous, step: bounded },
+      );
+    },
+    [questions.length, setState],
+  );
+
+  const markArrivalFocused = useCallback(
+    () =>
+      setState((previous) =>
+        previous.arrivalFocused ? previous : { ...previous, arrivalFocused: true },
+      ),
     [setState],
   );
 
@@ -81,7 +118,7 @@ export default function useAskQuestionsForm(
       }
     }
     return resolved;
-  }, [questions, state]);
+  }, [questions, state.text, state.selected]);
 
   const canSubmit =
     !locked && questions.every((question) => (ownValue(answers, question.id)?.length ?? 0) > 0);
@@ -107,12 +144,17 @@ export default function useAskQuestionsForm(
 
   return {
     state,
+    step: Math.min(state.step, Math.max(questions.length - 1, 0)),
     status,
     locked,
+    answers,
     canSubmit,
     setText,
     selectOption,
+    goToStep,
     submit,
     skip,
+    arrivalFocused: state.arrivalFocused,
+    markArrivalFocused,
   };
 }
