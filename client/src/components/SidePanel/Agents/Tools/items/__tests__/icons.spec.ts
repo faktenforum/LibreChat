@@ -135,7 +135,8 @@ describe('getIconForItem', () => {
       const result = getIconForItem(mcpItem('plain'));
       expect(result.iconUrl).toBeUndefined();
       expect(result.tintIcon).toBeUndefined();
-      expect(result.colorClass).toMatch(/violet/);
+      /** The kind keeps its own semantic role instead of being given an accent. */
+      expect(result.colorClass).not.toMatch(/^bg-[a-z]+-500\/15 text-/);
     });
   });
 });
